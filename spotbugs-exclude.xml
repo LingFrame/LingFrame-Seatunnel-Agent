@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter xmlns="https://raw.githubusercontent.com/spotbugs/filter/3.0/spotbugs-filter.xsd">
+
+    <!-- ByteBuddy Advice 类的方法签名特殊，排除相关误报 -->
+    <Match>
+        <Class name="~.*\.advice\..*Advice"/>
+        <Bug pattern="UCM_USELESS_VOID_METHOD,MS_EXPOSE_REP,EI_EXPOSE_REP,DLS_DEAD_LOCAL_STORE"/>
+    </Match>
+
+    <!-- Bridge 静态持有 volatile 契约指针，这是设计意图 -->
+    <Match>
+        <Class name="com.lingframe.agent.bridge.LingFrameAgentBridge"/>
+        <Bug pattern="ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD"/>
+    </Match>
+
+    <!-- Adapter 反射调用是 Agent 的固有需求#1 -->
+    <Match>
+        <Class name="~.*\.adapter\..*"/>
+        <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED,REC_CATCH_EXCEPTION,EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- 治理运行时聚合体通过构造函数注入持有各组件引用，这是设计意图 -->
+    <Match>
+        <Class name="com.lingframe.agent.pipeline.AgentGovernanceRuntime"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- HazelcastConfigCenter 通过构造函数依赖注入持有仓储与集群实例引用，这是设计意图 -->
+    <Match>
+        <Class name="com.lingframe.agent.config.HazelcastConfigCenter"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- GovernedTaskGroupHandler 通过 writeReplace 脱壳为原始 TaskGroup，
+         反序列化端不会得到 handler 对象，transient 字段无需恢复 -->
+    <Match>
+        <Class name="com.lingframe.agent.adapter.GovernedTaskGroupHandler"/>
+        <Bug pattern="SE_TRANSIENT_FIELD_NOT_RESTORED"/>
+    </Match>
+
+</FindBugsFilter>

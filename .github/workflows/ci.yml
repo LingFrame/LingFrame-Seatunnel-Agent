@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  MAVEN_OPTS: "-Xmx2g"
+
+jobs:
+  build-and-test:
+    name: Build & Test (JDK ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: [8, 17]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: ${{ matrix.java }}
+          cache: 'maven'
+
+      - name: Build & Quality Gate
+        run: mvn -B clean verify -Pintegration-check
+
+      - name: Upload JaCoCo Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report-jdk${{ matrix.java }}
+          path: '**/target/site/jacoco/'
+
+      - name: Upload Agent Fat-Jar
+        if: matrix.java == 8
+        uses: actions/upload-artifact@v4
+        with:
+          name: lingframe-seatunnel-agent.jar
+          path: lingframe-agent-dist/target/lingframe-seatunnel-agent.jar
+
+  e2e-test:
+    name: E2E Test (Docker)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: 8
+          cache: 'maven'
+
+      - name: Build Agent Fat-Jar
+        run: mvn -B clean package -DskipTests -pl lingframe-agent-bridge,lingframe-agent-core,lingframe-agent-dist -am
+
+      - name: Run E2E Tests
+        run: |
+          cd lingframe-agent-e2e
+          docker compose up -d
+          sleep 30
+          mvn -B verify -pl lingframe-agent-e2e
+          docker compose down -v

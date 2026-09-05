@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.lingframe.agent</groupId>
+  <artifactId>lingframe-agent-dist</artifactId>
+  <name>LingFrame Agent :: Distribution</name>
+  <version>0.1.0</version>
+  <description>Java Agent 外挂，为零源码修改为 Apache SeaTunnel 提供 LingFrame 治理能力</description>
+  <url>https://github.com/LingFrame/lingframe-seatunnel-agent/lingframe-agent-dist</url>
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>http://www.apache.org/licenses/LICENSE-2.0.txt</url>
+    </license>
+  </licenses>
+</project>
