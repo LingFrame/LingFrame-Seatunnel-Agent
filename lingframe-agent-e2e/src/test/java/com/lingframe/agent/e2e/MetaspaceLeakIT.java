@@ -102,46 +102,43 @@ class MetaspaceLeakIT {
 
         final List<String> matrixJobs = buildOrthogonalMatrixJobConfigs();
         final boolean isNativeRunning = isDockerContainerRunning(NATIVE_CONTAINER_NAME);
+        assertThat(isNativeRunning)
+                .as("Native control container '%s' must be running for strict A/B audit", NATIVE_CONTAINER_NAME)
+                .isTrue();
 
-        MetaspaceAuditResult nativeResult = null;
-        if (isNativeRunning) {
-            log.info("Starting Control Group benchmark on native SeaTunnel (without agent)...");
-            nativeResult = runTestMatrixAndAudit("Native-Control", NATIVE_REST_URL, NATIVE_CONTAINER_NAME, matrixJobs);
-        } else {
-            log.warn("Control Group container '{}' is not running, skipping A/B delta comparison", NATIVE_CONTAINER_NAME);
-        }
+        log.info("Starting Control Group benchmark on native SeaTunnel (without agent)...");
+        final MetaspaceAuditResult nativeResult =
+                runTestMatrixAndAudit("Native-Control", NATIVE_REST_URL, NATIVE_CONTAINER_NAME, matrixJobs);
 
         log.info("Starting Treatment Group benchmark on SeaTunnel with LingFrame Agent...");
         final MetaspaceAuditResult agentResult =
                 runTestMatrixAndAudit("Agent-Treatment", AGENT_REST_URL, AGENT_CONTAINER_NAME, matrixJobs);
 
-        if (nativeResult != null) {
-            final long netOverhead = agentResult.getNetGrowth() - nativeResult.getNetGrowth();
-            log.info("==================== [Metaspace A/B Audit Report] ====================");
-            log.info("Native Baseline: {} | Agent Baseline: {} | Baseline Delta: {}",
-                    formatMb(nativeResult.getBaseline()), formatMb(agentResult.getBaseline()),
-                    formatMb(agentResult.getBaseline() - nativeResult.getBaseline()));
-            log.info("Native Round 1 : {} | Agent Round 1 : {} | Round 1 Delta: {}",
-                    formatMb(nativeResult.getRound1()), formatMb(agentResult.getRound1()),
-                    formatMb(agentResult.getRound1() - nativeResult.getRound1()));
-            log.info("Native Round 2 : {} | Agent Round 2 : {} | Round 2 Delta: {}",
-                    formatMb(nativeResult.getRound2()), formatMb(agentResult.getRound2()),
-                    formatMb(agentResult.getRound2() - nativeResult.getRound2()));
-            log.info("Native Final   : {} | Agent Final   : {} | Final Delta: {}",
-                    formatMb(nativeResult.getFinalUsed()), formatMb(agentResult.getFinalUsed()),
-                    formatMb(agentResult.getFinalUsed() - nativeResult.getFinalUsed()));
-            log.info("Native Growth  : {} | Agent Growth  : {} | Net Overhead: {}",
-                    formatMb(nativeResult.getNetGrowth()), formatMb(agentResult.getNetGrowth()),
-                    formatMb(netOverhead));
-            log.info("Upper Growth Threshold: {} | Max Net Overhead Limit: {}",
-                    formatMb(METASPACE_GROWTH_THRESHOLD_BYTES), formatMb(MAX_NET_OVERHEAD_BYTES));
-            log.info("======================================================================");
+        final long netOverhead = agentResult.getNetGrowth() - nativeResult.getNetGrowth();
+        log.info("==================== [Metaspace A/B Audit Report] ====================");
+        log.info("Native Baseline: {} | Agent Baseline: {} | Baseline Delta: {}",
+                formatMb(nativeResult.getBaseline()), formatMb(agentResult.getBaseline()),
+                formatMb(agentResult.getBaseline() - nativeResult.getBaseline()));
+        log.info("Native Round 1 : {} | Agent Round 1 : {} | Round 1 Delta: {}",
+                formatMb(nativeResult.getRound1()), formatMb(agentResult.getRound1()),
+                formatMb(agentResult.getRound1() - nativeResult.getRound1()));
+        log.info("Native Round 2 : {} | Agent Round 2 : {} | Round 2 Delta: {}",
+                formatMb(nativeResult.getRound2()), formatMb(agentResult.getRound2()),
+                formatMb(agentResult.getRound2() - nativeResult.getRound2()));
+        log.info("Native Final   : {} | Agent Final   : {} | Final Delta: {}",
+                formatMb(nativeResult.getFinalUsed()), formatMb(agentResult.getFinalUsed()),
+                formatMb(agentResult.getFinalUsed() - nativeResult.getFinalUsed()));
+        log.info("Native Growth  : {} | Agent Growth  : {} | Net Overhead: {}",
+                formatMb(nativeResult.getNetGrowth()), formatMb(agentResult.getNetGrowth()),
+                formatMb(netOverhead));
+        log.info("Upper Growth Threshold: {} | Max Net Overhead Limit: {}",
+                formatMb(METASPACE_GROWTH_THRESHOLD_BYTES), formatMb(MAX_NET_OVERHEAD_BYTES));
+        log.info("======================================================================");
 
-            assertThat(netOverhead)
-                    .as("Agent net overhead should be <= %d bytes, actual: %d (nativeGrowth: %d, agentGrowth: %d)",
-                            MAX_NET_OVERHEAD_BYTES, netOverhead, nativeResult.getNetGrowth(), agentResult.getNetGrowth())
-                    .isLessThanOrEqualTo(MAX_NET_OVERHEAD_BYTES);
-        }
+        assertThat(netOverhead)
+                .as("Agent net overhead should be <= %d bytes, actual: %d (nativeGrowth: %d, agentGrowth: %d)",
+                        MAX_NET_OVERHEAD_BYTES, netOverhead, nativeResult.getNetGrowth(), agentResult.getNetGrowth())
+                .isLessThanOrEqualTo(MAX_NET_OVERHEAD_BYTES);
 
         assertThat(agentResult.getNetGrowth())
                 .as("Agent Metaspace growth should be < %d bytes, actual: %d (baseline: %d, final: %d)",
@@ -158,9 +155,12 @@ class MetaspaceLeakIT {
         // 1. 基线采样：记录初始 Metaspace
         forceFullGcInContainer(containerName);
         final long baseline = getCurrentMetaspaceUsed(containerName);
+        // 刚性断言：真实的 SeaTunnel JVM 启动后 Metaspace 必然大于 10MB（约 10,485,760 字节）
+        // 绝不容许任何抓错进程、解析错误或 0 字节伪造
         assertThat(baseline)
-                .as("Baseline Metaspace should be greater than 0, got: %d", baseline)
-                .isGreaterThan(0L);
+                .as("[%s] Baseline Metaspace must be > 10MB (real SeaTunnel JVM required), actual: %d bytes (%s)",
+                        targetLabel, baseline, formatMb(baseline))
+                .isGreaterThan(10 * 1024 * 1024L);
         log.info("[{}] Metaspace audit started: baseline={} bytes ({})",
                 targetLabel, baseline, formatMb(baseline));
 
@@ -215,6 +215,10 @@ class MetaspaceLeakIT {
         // 5. 阶段三：强制 Full GC 并采样终态 Metaspace
         forceFullGcInContainer(containerName);
         final long finalUsed = getCurrentMetaspaceUsed(containerName);
+        assertThat(finalUsed)
+                .as("[%s] Final Metaspace must be > 10MB (real SeaTunnel JVM required), actual: %d bytes (%s)",
+                        targetLabel, finalUsed, formatMb(finalUsed))
+                .isGreaterThan(10 * 1024 * 1024L);
         final long growth = finalUsed - baseline;
 
         log.info("[{}] Metaspace progression [Concurrent Final]: used={} bytes ({}), deltaFromBaseline={} bytes ({})",
@@ -352,20 +356,110 @@ class MetaspaceLeakIT {
 
     private void forceFullGcInContainer(String containerName) {
         try {
-            final Process p = new ProcessBuilder("docker", "exec", containerName, "jcmd", "1", "GC.run").start();
+            final String pid = resolveJavaPid(containerName);
+            final Process p = new ProcessBuilder("docker", "exec", containerName, "jcmd", pid, "GC.run").start();
             p.waitFor(5, TimeUnit.SECONDS);
             Thread.sleep(2000);
+        } catch (InterruptedException e) {
+            log.warn("Full GC trigger interrupted in container {}: {}", containerName, e.getMessage());
+            Thread.currentThread().interrupt();
         } catch (Exception e) {
             log.warn("Full GC trigger failed in container {}: {}", containerName, e.getMessage());
-            Thread.currentThread().interrupt();
         }
     }
 
+    /**
+     * 动态探测并获取容器内运行的 Java 进程 PID。
+     * <p>
+     * 容器的主进程通常是入口 Shell 脚本（占用 PID 1），真实的 SeaTunnel JVM 实例是其派生的子进程。
+     * 本方法首先通过容器内 JDK 自带的 {@code jps -l} 进行探测，排除 jps 自身瞬时进程后，精准锁定真实的 JVM PID；
+     * 若 jps 异常，后备使用 Linux 原生 {@code pgrep -f java} 进行兜底检索。
+     *
+     * @param containerName 目标 Docker 容器名
+     * @return 真实的 Java 进程 PID 字符串
+     * @throws IllegalStateException 若容器内未检测到任何正在运行的 Java 进程
+     */
+    private String resolveJavaPid(String containerName) throws Exception {
+        // 1. 优先通过 jps -l 检索，提取包含 SeaTunnelServer 或非 Jps 的真实 Java 进程
+        final ProcessBuilder jpsPb = new ProcessBuilder(
+                "docker", "exec", containerName, "jps", "-l");
+        jpsPb.redirectErrorStream(true);
+        final Process jpsProcess = jpsPb.start();
+        final List<String> jpsLines = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(jpsProcess.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                final String trimmed = line.trim();
+                if (!trimmed.isEmpty()) {
+                    jpsLines.add(trimmed);
+                }
+            }
+        }
+        jpsProcess.waitFor(5, TimeUnit.SECONDS);
+
+        // 优先匹配 SeaTunnel 核心服务类
+        for (String line : jpsLines) {
+            final String[] parts = line.split("\\s+");
+            if (parts.length >= 2 && parts[0].matches("\\d+")) {
+                final String pid = parts[0];
+                final String mainClass = parts[1];
+                if (!mainClass.contains("Jps") && (mainClass.contains("SeaTunnel") || mainClass.contains("starter"))) {
+                    return pid;
+                }
+            }
+        }
+
+        // 次选：排除 Jps 后的任意合法 Java PID
+        for (String line : jpsLines) {
+            final String[] parts = line.split("\\s+");
+            if (parts.length >= 1 && parts[0].matches("\\d+")) {
+                final String pid = parts[0];
+                final String mainClass = parts.length > 1 ? parts[1] : "";
+                if (!mainClass.contains("Jps")) {
+                    return pid;
+                }
+            }
+        }
+
+        // 2. 后备方案：通过 Linux 原生 pgrep -f java 查找 PID
+        final ProcessBuilder pgrepPb = new ProcessBuilder(
+                "docker", "exec", containerName, "sh", "-c", "pgrep -f java || pidof java");
+        pgrepPb.redirectErrorStream(true);
+        final Process pgrepProcess = pgrepPb.start();
+        final List<String> pgrepLines = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(pgrepProcess.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                final String trimmed = line.trim();
+                if (!trimmed.isEmpty()) {
+                    pgrepLines.add(trimmed);
+                }
+            }
+        }
+        pgrepProcess.waitFor(5, TimeUnit.SECONDS);
+
+        for (String line : pgrepLines) {
+            final String[] pids = line.split("\\s+");
+            for (String pid : pids) {
+                if (pid.matches("\\d+")) {
+                    return pid;
+                }
+            }
+        }
+
+        throw new IllegalStateException("Failed to resolve Java PID in container '"
+                + containerName + "'. jps output: " + jpsLines + ", pgrep output: " + pgrepLines);
+    }
+
     private long getCurrentMetaspaceUsed(String containerName) throws Exception {
-        // 1. 优先使用 JDK 8~21 通用的 jcmd 1 GC.heap_info
+        final String pid = resolveJavaPid(containerName);
+
+        // 1. 优先使用 JDK 8~21 通用的 jcmd <PID> GC.heap_info
         final ProcessBuilder pb = new ProcessBuilder(
                 "docker", "exec", containerName,
-                "jcmd", "1", "GC.heap_info");
+                "jcmd", pid, "GC.heap_info");
         pb.redirectErrorStream(true);
         final Process p = pb.start();
         final StringBuilder output = new StringBuilder();
@@ -384,10 +478,10 @@ class MetaspaceLeakIT {
             return kb * 1024L;
         }
 
-        // 2. 后备方案：使用 jstat -gc 1 提取 MU (Metaspace Used, KB)
+        // 2. 后备方案：使用 jstat -gc <PID> 提取 MU (Metaspace Used, KB)
         final ProcessBuilder jstatPb = new ProcessBuilder(
                 "docker", "exec", containerName,
-                "jstat", "-gc", "1");
+                "jstat", "-gc", pid);
         jstatPb.redirectErrorStream(true);
         final Process jstatP = jstatPb.start();
         final List<String> jstatLines = new ArrayList<>();
@@ -419,7 +513,7 @@ class MetaspaceLeakIT {
         }
 
         throw new IllegalStateException("Failed to parse Metaspace usage from container '"
-                + containerName + "'. jcmd output: [" + output.toString().trim() + "], jstat lines: " + jstatLines);
+                + containerName + "' (PID " + pid + "). jcmd output: [" + output.toString().trim() + "], jstat lines: " + jstatLines);
     }
 
     /**
