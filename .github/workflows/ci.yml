@@ -98,14 +98,28 @@ jobs:
             docker compose logs seatunnel-native
             exit 1
           fi
-          mvn -B verify || {
+          TEST_STATUS=0
+          mvn -B verify || TEST_STATUS=$?
+          echo "=== Metaspace Audit Log (target/logs/metaspace-audit.log) ==="
+          cat target/logs/metaspace-audit.log 2>/dev/null || echo "No metaspace-audit.log found"
+          if [ $TEST_STATUS -ne 0 ]; then
             echo "=== SeaTunnel Server Logs upon Failure ==="
             docker compose logs seatunnel-server
             docker compose logs seatunnel-native
             docker compose down -v
-            exit 1
-          }
+            exit $TEST_STATUS
+          fi
           docker compose down -v
+
+      - name: Upload E2E Test & Audit Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-audit-reports
+          path: |
+            lingframe-agent-e2e/target/logs/
+            lingframe-agent-e2e/target/failsafe-reports/
+          retention-days: 7
 
   publish-release:
     name: Publish GitHub Release
