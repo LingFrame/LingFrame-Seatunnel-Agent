@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -124,32 +125,32 @@ class MetaspaceLeakIT {
         final List<String> jobs = new ArrayList<>();
 
         // ① Fake -> Console（纯内存基线）
-        jobs.add("{\"env\":{\"execution.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Fake\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
+        jobs.add("{\"env\":{\"job.name\":\"fake2console\",\"job.mode\":\"BATCH\"},"
+                + "\"source\":[{\"plugin_name\":\"FakeSource\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
                 + "\"sink\":[{\"plugin_name\":\"Console\"}]}");
 
         // ② Fake -> MySQL（单端 JDBC 写入）
-        jobs.add("{\"env\":{\"execution.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Fake\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
+        jobs.add("{\"env\":{\"job.name\":\"fake2mysql\",\"job.mode\":\"BATCH\"},"
+                + "\"source\":[{\"plugin_name\":\"FakeSource\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
                 + "\"sink\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
                 + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
                 + "\"query\":\"" + INSERT_QUERY + "\"}]}");
 
         // ③ Fake -> Kafka（单端 MQ 生产）
-        jobs.add("{\"env\":{\"execution.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Fake\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
+        jobs.add("{\"env\":{\"job.name\":\"fake2kafka\",\"job.mode\":\"BATCH\"},"
+                + "\"source\":[{\"plugin_name\":\"FakeSource\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
                 + "\"sink\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
                 + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\",\"format\":\"json\"}]}");
 
         // ④ MySQL -> Console（单端 JDBC 读取）
-        jobs.add("{\"env\":{\"execution.mode\":\"BATCH\"},"
+        jobs.add("{\"env\":{\"job.name\":\"mysql2console\",\"job.mode\":\"BATCH\"},"
                 + "\"source\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
                 + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
                 + "\"query\":\"" + SELECT_QUERY + "\"," + SCHEMA_FIELDS + "}],"
                 + "\"sink\":[{\"plugin_name\":\"Console\"}]}");
 
         // ⑤ MySQL -> MySQL（双端真实 JDBC 同构）
-        jobs.add("{\"env\":{\"execution.mode\":\"BATCH\"},"
+        jobs.add("{\"env\":{\"job.name\":\"mysql2mysql\",\"job.mode\":\"BATCH\"},"
                 + "\"source\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
                 + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
                 + "\"query\":\"" + SELECT_QUERY + "\"," + SCHEMA_FIELDS + "}],"
@@ -158,7 +159,7 @@ class MetaspaceLeakIT {
                 + "\"query\":\"" + INSERT_QUERY + "\"}]}");
 
         // ⑥ MySQL -> Kafka（跨协议异构：DB -> MQ）
-        jobs.add("{\"env\":{\"execution.mode\":\"BATCH\"},"
+        jobs.add("{\"env\":{\"job.name\":\"mysql2kafka\",\"job.mode\":\"BATCH\"},"
                 + "\"source\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
                 + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
                 + "\"query\":\"" + SELECT_QUERY + "\"," + SCHEMA_FIELDS + "}],"
@@ -166,28 +167,28 @@ class MetaspaceLeakIT {
                 + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\",\"format\":\"json\"}]}");
 
         // ⑦ Kafka -> Console（单端 MQ 消费）
-        jobs.add("{\"env\":{\"execution.mode\":\"BATCH\"},"
+        jobs.add("{\"env\":{\"job.name\":\"kafka2console\",\"job.mode\":\"BATCH\"},"
                 + "\"source\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
                 + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\","
-                + "\"consumer.group\":\"e2e-group-console\",\"commit_on_checkpoint\":false,\"start_mode\":\"EARLIEST\","
+                + "\"consumer.group\":\"e2e-group-console\",\"commit_on_checkpoint\":false,\"start_mode\":\"earliest\","
                 + SCHEMA_FIELDS + ",\"format\":\"json\"}],"
                 + "\"sink\":[{\"plugin_name\":\"Console\"}]}");
 
         // ⑧ Kafka -> MySQL（跨协议异构：MQ -> DB）
-        jobs.add("{\"env\":{\"execution.mode\":\"BATCH\"},"
+        jobs.add("{\"env\":{\"job.name\":\"kafka2mysql\",\"job.mode\":\"BATCH\"},"
                 + "\"source\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
                 + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\","
-                + "\"consumer.group\":\"e2e-group-mysql\",\"commit_on_checkpoint\":false,\"start_mode\":\"EARLIEST\","
+                + "\"consumer.group\":\"e2e-group-mysql\",\"commit_on_checkpoint\":false,\"start_mode\":\"earliest\","
                 + SCHEMA_FIELDS + ",\"format\":\"json\"}],"
                 + "\"sink\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
                 + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
                 + "\"query\":\"" + INSERT_QUERY + "\"}]}");
 
         // ⑨ Kafka -> Kafka（双端真实 MQ 同构）
-        jobs.add("{\"env\":{\"execution.mode\":\"BATCH\"},"
+        jobs.add("{\"env\":{\"job.name\":\"kafka2kafka\",\"job.mode\":\"BATCH\"},"
                 + "\"source\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
                 + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\","
-                + "\"consumer.group\":\"e2e-group-kafka\",\"commit_on_checkpoint\":false,\"start_mode\":\"EARLIEST\","
+                + "\"consumer.group\":\"e2e-group-kafka\",\"commit_on_checkpoint\":false,\"start_mode\":\"earliest\","
                 + SCHEMA_FIELDS + ",\"format\":\"json\"}],"
                 + "\"sink\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-2\","
                 + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\",\"format\":\"json\"}]}");
@@ -208,7 +209,20 @@ class MetaspaceLeakIT {
             }
             final int responseCode = conn.getResponseCode();
             if (responseCode != 200) {
-                throw new IOException("SeaTunnel job submission failed (" + jobTag + "): HTTP " + responseCode);
+                final StringBuilder err = new StringBuilder();
+                try (InputStream es = conn.getErrorStream()) {
+                    if (es != null) {
+                        try (BufferedReader r = new BufferedReader(
+                                new InputStreamReader(es, StandardCharsets.UTF_8))) {
+                            String l;
+                            while ((l = r.readLine()) != null) {
+                                err.append(l).append('\n');
+                            }
+                        }
+                    }
+                }
+                throw new IOException("SeaTunnel job submission failed (" + jobTag + "): HTTP "
+                        + responseCode + " - " + err.toString().trim());
             }
         } finally {
             conn.disconnect();

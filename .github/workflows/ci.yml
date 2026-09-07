@@ -93,7 +93,12 @@ jobs:
             docker compose logs seatunnel-server
             exit 1
           fi
-          mvn -B verify
+          mvn -B verify || {
+            echo "=== SeaTunnel Server Logs upon Failure ==="
+            docker compose logs seatunnel-server
+            docker compose down -v
+            exit 1
+          }
           docker compose down -v
 
   publish-release:
