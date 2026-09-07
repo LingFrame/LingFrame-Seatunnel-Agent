@@ -71,7 +71,16 @@ jobs:
         run: |
           cd lingframe-agent-e2e
           docker compose up -d
-          sleep 35
+          echo "Waiting for SeaTunnel cluster to become ready on port 5801..."
+          for i in $(seq 1 36); do
+            if curl -s -f http://localhost:5801/hazelcast/health/ready >/dev/null; then
+              echo "SeaTunnel cluster is READY (attempt $i)!"
+              break
+            fi
+            echo "Waiting for cluster... ($i/36)"
+            sleep 5
+          done
+          docker compose ps
           mvn -B verify
           docker compose down -v
 
@@ -95,6 +104,8 @@ jobs:
           SEATUNNEL_VERSION=$(python3 -c "import xml.etree.ElementTree as ET; tree = ET.parse('pom.xml'); root = tree.getroot(); ns = {'m': 'http://maven.apache.org/POM/4.0.0'}; props = root.find('m:properties', ns); st_v = props.find('m:seatunnel.version', ns) if props is not None else None; print((st_v.text if st_v is not None else '2.3.13').strip())")
           ASSET_NAME="lingframe-seatunnel-agent-${AGENT_VERSION}-seatunnel-${SEATUNNEL_VERSION}.jar"
           echo "version=v${AGENT_VERSION}" >> $GITHUB_OUTPUT
+          echo "agent_version=${AGENT_VERSION}" >> $GITHUB_OUTPUT
+          echo "seatunnel_version=${SEATUNNEL_VERSION}" >> $GITHUB_OUTPUT
           echo "asset_name=${ASSET_NAME}" >> $GITHUB_OUTPUT
 
       - name: Check if Tag Already Exists
@@ -126,6 +137,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.get_version.outputs.version }}
-          name: Release ${{ steps.get_version.outputs.version }}
+          name: Release v${{ steps.get_version.outputs.agent_version }}-seatunnel-${{ steps.get_version.outputs.seatunnel_version }}
           generate_release_notes: true
           files: release-assets/${{ steps.get_version.outputs.asset_name }}
