@@ -158,6 +158,9 @@ class MetaspaceLeakIT {
         // 1. 基线采样：记录初始 Metaspace
         forceFullGcInContainer(containerName);
         final long baseline = getCurrentMetaspaceUsed(containerName);
+        assertThat(baseline)
+                .as("Baseline Metaspace should be greater than 0, got: %d", baseline)
+                .isGreaterThan(0L);
         log.info("[{}] Metaspace audit started: baseline={} bytes ({})",
                 targetLabel, baseline, formatMb(baseline));
 
@@ -344,21 +347,25 @@ class MetaspaceLeakIT {
         }
     }
 
+    private static final Pattern HEAP_INFO_METASPACE_PATTERN =
+            Pattern.compile("Metaspace\\s+used\\s+(\\d+)\\s*K", Pattern.CASE_INSENSITIVE);
+
     private void forceFullGcInContainer(String containerName) {
         try {
             final Process p = new ProcessBuilder("docker", "exec", containerName, "jcmd", "1", "GC.run").start();
             p.waitFor(5, TimeUnit.SECONDS);
             Thread.sleep(2000);
-        } catch (Exception ignored) {
-            // 忽略容器 Full GC 触发异常，不阻断主流程
+        } catch (Exception e) {
+            log.warn("Full GC trigger failed in container {}: {}", containerName, e.getMessage());
             Thread.currentThread().interrupt();
         }
     }
 
     private long getCurrentMetaspaceUsed(String containerName) throws Exception {
+        // 1. 优先使用 JDK 8~21 通用的 jcmd 1 GC.heap_info
         final ProcessBuilder pb = new ProcessBuilder(
                 "docker", "exec", containerName,
-                "jcmd", "1", "VM.metaspace");
+                "jcmd", "1", "GC.heap_info");
         pb.redirectErrorStream(true);
         final Process p = pb.start();
         final StringBuilder output = new StringBuilder();
@@ -371,11 +378,48 @@ class MetaspaceLeakIT {
         }
         p.waitFor(10, TimeUnit.SECONDS);
 
-        final Matcher matcher = METASPACE_USED_PATTERN.matcher(output);
+        final Matcher matcher = HEAP_INFO_METASPACE_PATTERN.matcher(output);
         if (matcher.find()) {
-            return Long.parseLong(matcher.group(1));
+            final long kb = Long.parseLong(matcher.group(1));
+            return kb * 1024L;
         }
-        return 0L;
+
+        // 2. 后备方案：使用 jstat -gc 1 提取 MU (Metaspace Used, KB)
+        final ProcessBuilder jstatPb = new ProcessBuilder(
+                "docker", "exec", containerName,
+                "jstat", "-gc", "1");
+        jstatPb.redirectErrorStream(true);
+        final Process jstatP = jstatPb.start();
+        final List<String> jstatLines = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(jstatP.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.trim().isEmpty()) {
+                    jstatLines.add(line.trim());
+                }
+            }
+        }
+        jstatP.waitFor(10, TimeUnit.SECONDS);
+
+        if (jstatLines.size() >= 2) {
+            final String[] headers = jstatLines.get(0).split("\\s+");
+            final String[] values = jstatLines.get(1).split("\\s+");
+            int muIndex = -1;
+            for (int i = 0; i < headers.length; i++) {
+                if ("MU".equalsIgnoreCase(headers[i])) {
+                    muIndex = i;
+                    break;
+                }
+            }
+            if (muIndex >= 0 && muIndex < values.length) {
+                final double kb = Double.parseDouble(values[muIndex]);
+                return (long) (kb * 1024.0);
+            }
+        }
+
+        throw new IllegalStateException("Failed to parse Metaspace usage from container '"
+                + containerName + "'. jcmd output: [" + output.toString().trim() + "], jstat lines: " + jstatLines);
     }
 
     /**
