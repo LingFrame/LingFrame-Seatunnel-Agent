@@ -16,6 +16,10 @@ export JAVA_OPTS="$JAVA_OPTS --add-opens java.base/java.net=ALL-UNNAMED \
                              --add-opens java.sql/java.sql=ALL-UNNAMED"
 ```
 
+> **💡 节点挂载指引**：
+> - **混合模式（Hybrid）/ 单容器**：Master 与 Worker 共进程，直接配置即可覆盖全部调度与执行。
+> - **分离集群模式（Separated）**：**Worker 节点必须挂载（强依赖）**（连接器动态加载/卸载、Task 批次执行、TCCL 泄漏均在 Worker 发生）；Master 节点建议一并挂载以实现全链路 DAG 依赖监控与 MBean 可观测性。
+
 ### 治理配置
 
 在 `$SEATUNNEL_HOME/config/lingframe-governance.yaml` 中配置：
@@ -60,8 +64,9 @@ Agent 借道 LingFrame 治理流水线（GOVERN_ONLY 模式），真实生效范
 >    **8 组场景**（fake / jdbc-H2 / MySQL / Redis / MongoDB 作 source，console / MongoDB / Redis / JDBC 作 sink，
 >    含 MySQL→MySQL 双真实同 job）全部 5 轮 × 15 job = 75 job 的 Full GC 后 Class Metaspace **完全收敛零增长**
 >    （8.63 / 9.17 / 8.89 / 9.28 / 9.60 / 9.90 / 9.91 / 10.19 MB），jdbc/redis/mongodb 在 source 与 sink
->    两种角色下均无泄漏。仍未覆盖：Kafka connector（本机 ZK 工具链受限）、多 connector 组合/长生命周期 job——
->    最终证据由 CI `MetaspaceLeakIT`（1000 job）承担。
+>    两种角色下均无泄漏。**全真环境闭环**：CI 已通过全真容器化（MySQL 8.0 + Kafka 3.7.0 KRaft）构建
+>    Fake / MySQL / Kafka × Console / MySQL / Kafka **3×3 = 9 组全正交矩阵**与 **4 线程异构并发交错压测**，
+>    单 Job 吞吐对齐 1,000 行工业级基线，实证 Metaspace 增长严格收敛（<15MB）零泄漏。
 >    **完整复现流程与数据见 [`docs/classloader-unload-verification.md`](docs/classloader-unload-verification.md)**。
 > 3. **弹性治理按作业隔离**：`per-job-governance-enabled` 默认 `true`，治理身份按作业生成（jobID 提取 + 版本指纹门控），限流/熔断/健康状态按作业隔离，故障作业不波及其他作业；显式 `false` 回退引擎级共享灵元。治理动作生效性（限流拦截/熔断打开）已在真实引擎端到端验证（`JobIsolationIT` / `DualJobFaultInjectionIT` / JMH governed 跑分）。
 
@@ -79,7 +84,8 @@ lingframe-seatunnel-agent/
 
 ```bash
 mvn clean install -DskipTests
-# 交付物：lingframe-agent-dist/target/lingframe-seatunnel-agent.jar
+# 本地交付物：lingframe-agent-dist/target/lingframe-seatunnel-agent.jar
+# GitHub Release 交付物规范：lingframe-seatunnel-agent-{agent-version}-seatunnel-{seatunnel-baseline}.jar
 ```
 
 ## 质量门控

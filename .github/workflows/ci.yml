@@ -72,15 +72,27 @@ jobs:
           cd lingframe-agent-e2e
           docker compose up -d
           echo "Waiting for SeaTunnel cluster to become ready on port 5801..."
+          READY=false
           for i in $(seq 1 36); do
+            if [ "$(docker inspect -f '{{.State.Running}}' seatunnel-server 2>/dev/null)" != "true" ]; then
+              echo "seatunnel-server container is NOT running (crashed)! Aborting wait."
+              break
+            fi
             if curl -s -f http://localhost:5801/hazelcast/health/ready >/dev/null; then
               echo "SeaTunnel cluster is READY (attempt $i)!"
+              READY=true
               break
             fi
             echo "Waiting for cluster... ($i/36)"
             sleep 5
           done
-          docker compose ps
+          echo "=== Docker Compose PS ==="
+          docker compose ps -a
+          if [ "$READY" != "true" ]; then
+            echo "=== SeaTunnel Server Crash Logs ==="
+            docker compose logs seatunnel-server
+            exit 1
+          fi
           mvn -B verify
           docker compose down -v
 
