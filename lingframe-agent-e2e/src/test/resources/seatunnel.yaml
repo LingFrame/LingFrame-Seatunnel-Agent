@@ -1,0 +1,32 @@
+# SeaTunnel 引擎配置（MetaspaceLeakIT 端到端专用）
+#
+# ⚠️ classloader-cache-mode 必须为 false，本 E2E 才具有验证意义：
+# Agent 的 ClassLoaderReleaseAdvice 采用双态自适应清理——cacheMode=true 时 ClassLoader
+# 被多作业共享，切面会主动跳过物理释放（共享 ClassLoader 绝不能关闭）。若此处为 true，
+# 作业结束不产生任何物理释放动作，「Metaspace 零泄漏」断言将永远成立但什么都没验证到。
+seatunnel:
+  engine:
+    backup-count: 1
+    # 1000 个作业的历史记录会占用堆内存，缩短过期时间避免干扰 Metaspace 测量
+    history-job-expire-minutes: 60
+    print-execution-info-interval: 60
+    print-job-metrics-info-interval: 60
+    classloader-cache-mode: false
+    slot-service:
+      dynamic-slot: true
+    job-schedule-strategy: WAIT
+    checkpoint:
+      interval: 300000
+      timeout: 60000
+      storage:
+        # checkpoint 存储类型固定为 hdfs：LocalFile 类型已被 SeaTunnel 官方弃用，
+        # 本地文件场景通过 fs.defaultFS=file:/// 走 hdfs 插件实现（容器内无 HDFS 依赖）
+        type: hdfs
+        max-retained: 3
+        plugin-config:
+          storage.type: hdfs
+          namespace: /tmp/seatunnel/checkpoint/
+          fs.defaultFS: file:///tmp/
+    telemetry:
+      metric:
+        enabled: false

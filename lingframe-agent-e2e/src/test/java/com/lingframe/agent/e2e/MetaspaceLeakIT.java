@@ -60,7 +60,7 @@ class MetaspaceLeakIT {
     }
 
     private void submitDummyJob(int jobId) throws IOException {
-        final String jobConfig = buildDummyJobConfig(jobId);
+        final String jobConfig = buildDummyJobConfig();
         final HttpURLConnection conn = (HttpURLConnection) new URL(SEATUNNEL_REST_URL).openConnection();
         try {
             conn.setRequestMethod("POST");
@@ -73,14 +73,14 @@ class MetaspaceLeakIT {
             }
             final int responseCode = conn.getResponseCode();
             if (responseCode != 200) {
-                throw new IOException("SeaTunnel job submission failed: HTTP " + responseCode);
+                throw new IOException("SeaTunnel job submission failed (job #" + jobId + "): HTTP " + responseCode);
             }
         } finally {
             conn.disconnect();
         }
     }
 
-    private String buildDummyJobConfig(int jobId) {
+    private String buildDummyJobConfig() {
         return "{\"env\":{\"execution.mode\":\"BATCH\"},"
                 + "\"source\":[{\"plugin_name\":\"Fake\",\"row.num\":16,\"schema\":{\"fields\":{\"id\":\"int\"}}}],"
                 + "\"sink\":[{\"plugin_name\":\"Console\"}]}";
@@ -122,6 +122,9 @@ class MetaspaceLeakIT {
      * <p>
      * 通过 docker inspect 检查容器运行状态。若 Docker 未安装或容器未启动，
      * 返回 false，调用方应通过 JUnit Assumption 跳过测试而非报错。
+     * <p>
+     * 注意：`docker inspect` 对「容器存在但已停止（Exited）」也会返回退出码 0，
+     * 仅凭退出码会误判为运行中；必须解析 {@code {{.State.Running}}} 的输出是否为 {@code true}。
      *
      * @return 容器正在运行返回 true，否则返回 false
      */
@@ -130,7 +133,15 @@ class MetaspaceLeakIT {
             final Process p = new ProcessBuilder("docker", "inspect", "-f", "{{.State.Running}}", CONTAINER_NAME)
                     .redirectErrorStream(true)
                     .start();
-            return p.waitFor() == 0;
+            final StringBuilder output = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line);
+                }
+            }
+            return p.waitFor() == 0 && Boolean.parseBoolean(output.toString().trim());
         } catch (Exception e) {
             return false;
         }

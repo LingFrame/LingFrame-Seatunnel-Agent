@@ -23,13 +23,13 @@ import net.bytebuddy.asm.Advice;
 public final class TaskExecutionAdvice {
 
     @Advice.OnMethodEnter
-    public static void onCallEnter() {
-        LingFrameAgentBridge.beforeTaskCall();
+    public static void onCallEnter(@Advice.This Object task) {
+        LingFrameAgentBridge.beforeTaskCall(task);
     }
 
     @Advice.OnMethodExit(onThrowable = Throwable.class)
-    public static void onCallExit(@Advice.Thrown Throwable thrown) {
-        LingFrameAgentBridge.afterTaskCall(thrown);
+    public static void onCallExit(@Advice.Thrown Throwable thrown, @Advice.This Object task) {
+        LingFrameAgentBridge.afterTaskCall(task, thrown);
     }
 
     private TaskExecutionAdvice() {

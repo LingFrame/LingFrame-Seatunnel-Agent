@@ -53,17 +53,18 @@ class LingFrameAgentBridgeTest {
                     new URL("file:/a.jar")
             );
             final String key = LingFrameAgentBridge.convertJarsToKey(jars);
-            assertThat(key).isEqualTo("file:/a.jarfile:/z.jar");
+            assertThat(key).isEqualTo("file:/a.jar\nfile:/z.jar");
         }
 
         @Test
         @DisplayName("beforeTaskCall 与 afterTaskCall 无契约时应安全静默不抛异常")
         void shouldNotThrowOnTaskHooksWhenNoContract() {
-            assertThatCode(LingFrameAgentBridge::beforeTaskCall)
+            final Object task = new Object();
+            assertThatCode(() -> LingFrameAgentBridge.beforeTaskCall(task))
                     .doesNotThrowAnyException();
-            assertThatCode(() -> LingFrameAgentBridge.afterTaskCall(null))
+            assertThatCode(() -> LingFrameAgentBridge.afterTaskCall(null, null))
                     .doesNotThrowAnyException();
-            assertThatCode(() -> LingFrameAgentBridge.afterTaskCall(new RuntimeException("test")))
+            assertThatCode(() -> LingFrameAgentBridge.afterTaskCall(task, new RuntimeException("test")))
                     .doesNotThrowAnyException();
         }
     }
@@ -108,16 +109,19 @@ class LingFrameAgentBridgeTest {
         }
 
         @Test
-        @DisplayName("beforeTaskCall 与 afterTaskCall 应准确委托给契约")
+        @DisplayName("beforeTaskCall 与 afterTaskCall 应准确委托给契约并透传 task")
         void shouldDelegateTaskHooks() {
             final RecordingContract contract = new RecordingContract();
             LingFrameAgentBridge.registerContract(contract);
 
-            LingFrameAgentBridge.beforeTaskCall();
+            final Object task = new Object();
+            LingFrameAgentBridge.beforeTaskCall(task);
             assertThat(contract.beforeTaskCallCalled).isTrue();
+            assertThat(contract.beforeTaskCallTask).isSameAs(task);
 
             final Throwable error = new RuntimeException("boom");
-            LingFrameAgentBridge.afterTaskCall(error);
+            LingFrameAgentBridge.afterTaskCall(task, error);
+            assertThat(contract.afterTaskCallTask).isSameAs(task);
             assertThat(contract.afterTaskCallError).isSameAs(error);
         }
     }
@@ -127,6 +131,8 @@ class LingFrameAgentBridgeTest {
         private ClassLoader releasedClassLoader;
         private Collection<URL> convertedJars;
         private boolean beforeTaskCallCalled;
+        private Object beforeTaskCallTask;
+        private Object afterTaskCallTask;
         private Throwable afterTaskCallError;
 
         @Override
@@ -147,12 +153,14 @@ class LingFrameAgentBridgeTest {
         }
 
         @Override
-        public void beforeTaskCall() {
+        public void beforeTaskCall(Object task) {
             this.beforeTaskCallCalled = true;
+            this.beforeTaskCallTask = task;
         }
 
         @Override
-        public void afterTaskCall(Throwable error) {
+        public void afterTaskCall(Object task, Throwable error) {
+            this.afterTaskCallTask = task;
             this.afterTaskCallError = error;
         }
     }

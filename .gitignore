@@ -34,3 +34,8 @@ temp/
 
 # Flatten
 .flattened-pom.xml
+
+# Shade / build-reduced
+dependency-reduced-pom.xml
+target-verify/
+docs/dev/

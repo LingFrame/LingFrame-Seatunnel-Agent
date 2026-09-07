@@ -16,7 +16,8 @@ import net.bytebuddy.asm.Advice;
  * 已释放 ClassLoader 数量通常很少（仅卸载过的 ClassLoader），大多数调用直接放行。
  * <p>
  * 线程安全：advice 代码被织入目标方法，无共享可变状态。
- * {@link ReleasedClassLoaderRegistry} 使用 synchronizedSet(WeakHashMap)，线程安全。
+ * {@link ReleasedClassLoaderRegistry} 使用 ReadWriteLock（WeakHashMap 弱引用底层）——
+ * 读路径 isReleased 用读锁（热路径近似无锁），写路径 register 用写锁（低频）。
  * <p>
  * Bootstrap 可见性：ReleasedClassLoaderRegistry 位于 Bridge 模块，
  * 通过 appendToBootstrap 注入 Bootstrap ClassLoader，

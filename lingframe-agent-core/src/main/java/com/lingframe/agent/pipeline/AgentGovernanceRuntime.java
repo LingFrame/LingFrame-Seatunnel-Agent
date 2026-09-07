@@ -4,6 +4,7 @@ import com.lingframe.agent.config.HazelcastConfigCenter;
 import com.lingframe.core.event.EventBus;
 import com.lingframe.core.ling.LingRepository;
 import com.lingframe.core.ling.LingUnloadCoordinator;
+import com.lingframe.core.ling.VirtualLingManager;
 import com.lingframe.core.metrics.MetricsCollector;
 import com.lingframe.core.pipeline.InvocationPipelineEngine;
 
@@ -28,19 +29,23 @@ public final class AgentGovernanceRuntime {
     private final HazelcastConfigCenter configCenter;
     private final EventBus eventBus;
     private final MetricsCollector metricsCollector;
+    /** 虚拟灵元注册入口（作业级治理复用：共享灵元 + 作业灵元统一经此注册/注销；resilience 关闭时为 null）。 */
+    private final VirtualLingManager virtualLingManager;
 
     public AgentGovernanceRuntime(InvocationPipelineEngine pipelineEngine,
                                   LingUnloadCoordinator unloadCoordinator,
                                   LingRepository lingRepository,
                                   HazelcastConfigCenter configCenter,
                                   EventBus eventBus,
-                                  MetricsCollector metricsCollector) {
+                                  MetricsCollector metricsCollector,
+                                  VirtualLingManager virtualLingManager) {
         this.pipelineEngine = pipelineEngine;
         this.unloadCoordinator = unloadCoordinator;
         this.lingRepository = lingRepository;
         this.configCenter = configCenter;
         this.eventBus = eventBus;
         this.metricsCollector = metricsCollector;
+        this.virtualLingManager = virtualLingManager;
     }
 
     public InvocationPipelineEngine getPipelineEngine() {
@@ -65,5 +70,9 @@ public final class AgentGovernanceRuntime {
 
     public MetricsCollector getMetricsCollector() {
         return metricsCollector;
+    }
+
+    public VirtualLingManager getVirtualLingManager() {
+        return virtualLingManager;
     }
 }

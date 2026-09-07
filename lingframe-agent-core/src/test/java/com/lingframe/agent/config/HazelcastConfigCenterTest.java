@@ -152,6 +152,24 @@ class HazelcastConfigCenterTest {
         }
 
         @Test
+        @DisplayName("bulkhead-max-concurrent 应纳入热刷（此前硬编码不热刷）")
+        void shouldHotRefreshBulkheadMaxConcurrent() {
+            backingData.put(HazelcastConfigCenter.KEY_BULKHEAD_MAX_CONCURRENT, "42");
+
+            final EntryEvent<String, String> event = new EntryEvent<>(
+                    "test-source", null, EntryEventType.UPDATED.getType(),
+                    HazelcastConfigCenter.KEY_BULKHEAD_MAX_CONCURRENT, "42"
+            );
+
+            assertThat(updatedListener).isNotNull();
+            updatedListener.entryUpdated(event);
+
+            final LingRuntime runtime = lingRepository.getRuntime("seatunnel");
+            assertThat(runtime).isNotNull();
+            assertThat(runtime.getConfig().getBulkheadMaxConcurrent()).isEqualTo(42);
+        }
+
+        @Test
         @DisplayName("EntryAdded 事件触发时应正确刷新虚拟灵元配置")
         void shouldUpdateVirtualLingConfigOnEntryAdded() {
             backingData.put(HazelcastConfigCenter.KEY_RATE_LIMIT, "1200");
@@ -219,6 +237,43 @@ class HazelcastConfigCenterTest {
             assertThat(configCenter.isInitialized()).isFalse();
             // 5 类事件共 5 个监听器
             verify(mockMap, times(5)).removeEntryListener(eq(listenerId));
+        }
+
+        @Test
+        @DisplayName("作业级 key job.{jobId}.{bareKey} 应覆盖全局，仅刷新该作业灵元")
+        void shouldApplyJobLevelOverrideOnlyToTargetJob() {
+            // 注册作业灵元与共享灵元
+            virtualLingManager.register(HazelcastConfigCenter.JOB_LING_PREFIX + "7", LingRuntimeConfig.defaults());
+
+            backingData.put("job.7." + HazelcastConfigCenter.KEY_RATE_LIMIT, "700");
+            final EntryEvent<String, String> event = new EntryEvent<>(
+                    "test-source", null, EntryEventType.UPDATED.getType(),
+                    "job.7." + HazelcastConfigCenter.KEY_RATE_LIMIT, "700"
+            );
+
+            updatedListener.entryUpdated(event);
+
+            // 仅目标作业被覆盖
+            assertThat(lingRepository.getRuntime("seatunnel-job-7").getConfig().getRateLimitPerSecond()).isEqualTo(700);
+            // 共享灵元不受作业级 key 影响（保持在默认 0）
+            assertThat(lingRepository.getRuntime("seatunnel").getConfig().getRateLimitPerSecond()).isEqualTo(0);
+        }
+
+        @Test
+        @DisplayName("作业级 key 缺失时应回退全局裸 key，并广播到共享灵元与作业灵元")
+        void shouldFallbackJobToGlobalWhenJobLevelKeyAbsent() {
+            virtualLingManager.register(HazelcastConfigCenter.JOB_LING_PREFIX + "8", LingRuntimeConfig.defaults());
+
+            backingData.put(HazelcastConfigCenter.KEY_RATE_LIMIT, "600");
+            final EntryEvent<String, String> event = new EntryEvent<>(
+                    "test-source", null, EntryEventType.UPDATED.getType(),
+                    HazelcastConfigCenter.KEY_RATE_LIMIT, "600"
+            );
+
+            updatedListener.entryUpdated(event);
+
+            assertThat(lingRepository.getRuntime("seatunnel").getConfig().getRateLimitPerSecond()).isEqualTo(600);
+            assertThat(lingRepository.getRuntime("seatunnel-job-8").getConfig().getRateLimitPerSecond()).isEqualTo(600);
         }
     }
 }

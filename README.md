@@ -24,7 +24,7 @@ export JAVA_OPTS="$JAVA_OPTS --add-opens java.base/java.net=ALL-UNNAMED \
 governance:
   enabled: true
   dev-mode: false          # false=零信任(默认)，true=开发模式放行未声明权限
-  task-execution-advice-enabled: false  # 批次级治理切点，默认关闭
+  task-execution-advice-enabled: false  # 批次级治理切点显式开关（默认 false，但熔断/限流/灰度/权限任一开启时自动生效，见下）
   routing:
     gray-routing-enabled: false
   security:
@@ -33,23 +33,37 @@ governance:
 
 ## 治理能力
 
-当前版本以 `GOVERN_ONLY` 模式借道 LingFrame 治理流水线，真实生效范围如下：
+Agent 借道 LingFrame 治理流水线（GOVERN_ONLY 模式），真实生效范围如下：
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
 | 指标收集 + 事件发布 | **已生效** | TrafficMetricsFilter / EventBus 深度集成，调用量、QPS、延迟与异常指标实时可观测 |
 | 审计追踪 | **已生效** | 治理链路 Trace 采集，可通过 EventBus 订阅审计事件 |
-| ClassLoader 深度清理 | **已生效** | ClassLoaderReleaseAdvice 织入 releaseClassLoader 拦截点，触发 JDBC 驱动注销 + URLClassLoader 关闭 + ThreadLocal 深度安全清理 |
-| 权限审计 | **可配置** | `governance.dev-mode: false`（默认）时零信任拒绝未声明权限；`true` 时放行便于联调 |
-| 熔断 / 限流 | **默认关闭，可显式开启** | 切点在 `AbstractTask.call()` 批次调度级（非数据流 Hot Path）。默认关闭，需设置 `governance.task-execution-advice-enabled: true` 显式开启。开启后 `beforeTaskCall` 构造 `InvocationContext`（GOVERN_ONLY 模式）调 `pipelineEngine.invoke(ctx)` 走完整 12 Filter 链前置治理（含 `ResilienceGovernanceFilter` 限流/熔断前置检查）；`afterTaskCall` 回灌真实业务结果到 `LingHealthMetrics`，触发 `RuntimeStatus.DEGRADED → MacroStateGuardFilter` 熔断路径 |
+| ClassLoader 深度清理 | **已生效** | ClassLoaderReleaseAdvice 织入 releaseClassLoader 拦截点，触发 JDBC 驱动注销 + URLClassLoader 关闭 + ThreadLocal 深度安全清理。**生效范围：`classloader-cache-mode: false`（每 job 独立 ClassLoader）场景**；`cache-mode: true`（共享缓存，SeaTunnel 默认）时 ClassLoader 为多 job 共享常驻（SeaTunnel 设计），Agent 不做物理关闭，仅提供 TCCL 残留防御 |
+| 权限审计 | **默认关闭** | 需 `governance.security.permission-enabled: true` 且 `dev-mode: false` 才进入零信任（Deny-by-Default）。注意 Agent 自身不声明 `requiredPermission`，单独开启会导致每个批次刷一条拒绝告警，请配合为虚拟灵元补齐权限声明 |
+| 熔断 / 限流 | **默认关闭**（纯 ClassLoader 清理，零治理）；显式开启即真实生效 | 熔断/限流与批次切点**均默认 `false`**。需要治理的部署在 `lingframe-governance.yaml` 显式开 `circuit-breaker-enabled`/`rate-limiter-enabled`（或 `task-execution-advice-enabled`）即可：任一治理特性开启时批次切点**自动联动织入**（防「开了弹性却忘开切点」的伪开启），`beforeTaskCall` 构造 `InvocationContext` 调 `pipelineEngine.invoke(ctx)` 走完整 12 Filter 链前置治理（含 `ResilienceGovernanceFilter` 限流/熔断前置检查）；`afterTaskCall` 回灌真实业务结果到 `LingHealthMetrics`，触发 `RuntimeStatus.DEGRADED → MacroStateGuardFilter` 熔断路径。**熔断默认 fail-open 软退避（`CIRCUIT_OPEN/RATE_LIMITED/BULKHEAD_FULL` 命中仅 sleep 100ms 后放行，不真正甩负载）；设置 `governance.resilience.fail-closed: true` 后 `CIRCUIT_OPEN/BULKHEAD_FULL` 改为抛出 `GovernanceRejectException` 使 `call()` 失败触发引擎 Failover，即「熔断名副其实」**。**失败率口径：仅下游可用性异常（超时/IO/连接类）计入熔断失败率，普通业务异常（Transform/数据错误）不虚高指标**。**粒度：作业级隔离（`per-job-governance-enabled` 默认 `true`）**——治理身份按作业生成（jobID 提取 + 运行期版本指纹门控），限流/熔断/健康状态按作业隔离，故障作业不波及其他作业；显式 `per-job-governance-enabled: false` 可回退引擎级共享灵元 |
 | 路由 / 状态守卫 | **已生效（虚拟灵元 ACTIVE）** | 注入生产级 VirtualLingManager 生成的虚拟灵元（状态处于 ACTIVE），MacroStateGuardFilter 与指标双向闭环联动 |
 | 灰度路由 | **已装配，可扩展** | LabelMatchRouter 已注册，支持结合扩展灵元定义细粒度流量路由策略 |
-| 分布式动态配置 | **已生效** | HazelcastConfigCenter 通过 IMap `lingframe-governance-config` 监听 5 类 Entry 事件（新增/更新/删除/驱逐/过期），毫秒级热刷新虚拟灵元 LingRuntimeConfig，支持配置删除安全回退 |
+| 分布式动态配置 | **需治理切点生效** | HazelcastConfigCenter 通过 IMap `lingframe-governance-config` 监听 5 类 Entry 事件（新增/更新/删除/驱逐/过期），毫秒级热刷新虚拟灵元 LingRuntimeConfig（限流 / 熔断阈值 / 滑动窗口 / 超时 / **`bulkhead-max-concurrent`**），支持配置删除安全回退。热刷新的参数由 Pipeline 内的弹性治理 Filter 消费，因此需治理切点生效（任一治理特性开启即自动织入）才有可观测效果 |
 
-> **治理链路说明**：Agent 默认仅启用 ClassLoader 深度清理（零性能损耗与零业务干扰）。
-> 批次级治理（`AbstractTask.call()` 切点）默认关闭——需在 `lingframe-governance.yaml` 中显式设置
-> `governance.task-execution-advice-enabled: true` 开启，开启时日志输出风险提示
-> （吞吐下降、Checkpoint 超时风险），请监控后决定是否保持开启。
+> **治理链路说明**：**默认不开启批次级治理**——Agent 默认仅启用 ClassLoader 深度清理（零性能损耗与零业务干扰）。
+> 熔断/限流等治理特性与批次切点（`AbstractTask.call()`）全部默认 `false`，需在 `lingframe-governance.yaml`
+> 中显式开启。任一治理特性开启时批次切点**自动联动织入**（无需单独开 `task-execution-advice-enabled`，
+> 织入时日志输出风险提示：吞吐下降、Checkpoint 超时风险，请监控后决定是否保持开启）。
+
+> **⚠️ 能力边界（诚实标注，2026-09-06）**
+> 1. **连接器「热加载」不属本 Agent 范围**：Agent 仅织入 `releaseClassLoader`（卸载侧）；
+>    SeaTunnel 进程启动后新增/替换连接器 jar 的机制（connector 发现/注册为启动期一次性）不在当前能力内。
+> 2. **热卸载（Metaspace 泄漏治理）仅在 `cache-mode: false` 场景生效**：SeaTunnel 默认 `cache-mode: true`
+>    为共享缓存常驻（上游设计，非泄漏）。**本机实证（2026-09-06，source × sink 双维度矩阵）**：真实引擎
+>    `cache-mode: false` + governed agent 循环 job，卸载链路真实执行（15 job 产生 60 次物理释放日志），
+>    **8 组场景**（fake / jdbc-H2 / MySQL / Redis / MongoDB 作 source，console / MongoDB / Redis / JDBC 作 sink，
+>    含 MySQL→MySQL 双真实同 job）全部 5 轮 × 15 job = 75 job 的 Full GC 后 Class Metaspace **完全收敛零增长**
+>    （8.63 / 9.17 / 8.89 / 9.28 / 9.60 / 9.90 / 9.91 / 10.19 MB），jdbc/redis/mongodb 在 source 与 sink
+>    两种角色下均无泄漏。仍未覆盖：Kafka connector（本机 ZK 工具链受限）、多 connector 组合/长生命周期 job——
+>    最终证据由 CI `MetaspaceLeakIT`（1000 job）承担。
+>    **完整复现流程与数据见 [`docs/classloader-unload-verification.md`](docs/classloader-unload-verification.md)**。
+> 3. **弹性治理按作业隔离**：`per-job-governance-enabled` 默认 `true`，治理身份按作业生成（jobID 提取 + 版本指纹门控），限流/熔断/健康状态按作业隔离，故障作业不波及其他作业；显式 `false` 回退引擎级共享灵元。治理动作生效性（限流拦截/熔断打开）已在真实引擎端到端验证（`JobIsolationIT` / `DualJobFaultInjectionIT` / JMH governed 跑分）。
 
 ## 架构
 

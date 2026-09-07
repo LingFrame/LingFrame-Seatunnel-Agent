@@ -1,0 +1,23 @@
+# LingFrame Agent 治理配置（MetaspaceLeakIT 端到端专用）
+#
+# 本 E2E 验证的是插件 ClassLoader 物理释放后 Metaspace 不持续增长，
+# 对应 Agent 默认的「ClassLoader 深度清理」模式，因此**所有治理特性全部关闭**：
+# 批次治理切点保持关闭，且熔断/限流也置 false（防止批次切点经
+# isEffectiveTaskExecutionAdviceEnabled 随任一治理特性自动联动织入）——
+# 织入会在 AbstractTask.call() 上增加毫秒级治理开销，干扰泄漏测量的纯净性。
+governance:
+  enabled: true
+  dev-mode: false
+  per-job-governance-enabled: false     # 显式关闭（M4 转正后默认 true）：纯测 ClassLoader 清理，不装配作业级治理
+  task-execution-advice-enabled: false
+  routing:
+    gray-routing-enabled: false
+  security:
+    permission-enabled: false
+  resilience:
+    circuit-breaker-enabled: false
+    rate-limiter-enabled: false
+    rate-limit-per-second: 100
+    circuit-breaker-failure-rate-threshold: 50
+    circuit-breaker-sliding-window-size: 20
+    default-timeout-ms: 3000

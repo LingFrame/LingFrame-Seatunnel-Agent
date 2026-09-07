@@ -19,15 +19,38 @@
 
     <properties>
         <seatunnel.version>2.3.8</seatunnel.version>
-        <testcontainers.version>1.19.3</testcontainers.version>
         <jacoco.skip>true</jacoco.skip>
     </properties>
 
     <dependencies>
+        <!-- 说明：e2e 直接装配 core 的 adapter/pipeline/config 组件，只需 reactor 内的 core/bridge 最新源码。
+             不依赖 dist 阴影包：dist 是 -javaagent 用的 Fat-Jar，其 classpath 若在 core 之前会抢先加载
+             本地仓库旧版 core 类（如 MethodHandle 版 JobIdExtractor），在 JDK17 下提取 jobID 失败，
+             造成 M2 验收假性失败。AgentJarManifestTest 通过文件路径读 dist jar，无需 classpath 依赖。 -->
         <dependency>
             <groupId>com.lingframe.agent</groupId>
-            <artifactId>lingframe-agent-dist</artifactId>
+            <artifactId>lingframe-agent-core</artifactId>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.lingframe.agent</groupId>
+            <artifactId>lingframe-agent-bridge</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- core 对 hazelcast 为 provided（生产由 SeaTunnel 宿主提供），e2e 进程需自备该类，
+             否则 HazelcastConfigCenter 加载时 NoClassDefFound。 -->
+        <dependency>
+            <groupId>org.apache.seatunnel</groupId>
+            <artifactId>seatunnel-shade-hazelcast</artifactId>
+            <version>5.1-3.0.0</version>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>com.hazelcast</groupId>
+                    <artifactId>hazelcast</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <dependency>

@@ -10,7 +10,7 @@
     <packaging>pom</packaging>
 
     <name>LingFrame SeaTunnel Agent</name>
-    <description>Java Agent 外挂，为零源码修改为 Apache SeaTunnel 提供 LingFrame 治理能力</description>
+    <description>Java Agent 外挂，为 Apache SeaTunnel 提供 LingFrame 治理能力</description>
     <url>https://github.com/LingFrame/lingframe-seatunnel-agent</url>
 
     <licenses>
@@ -25,6 +25,7 @@
         <module>lingframe-agent-core</module>
         <module>lingframe-agent-dist</module>
         <module>lingframe-agent-e2e</module>
+        <module>lingframe-agent-benchmark</module>
     </modules>
 
     <properties>

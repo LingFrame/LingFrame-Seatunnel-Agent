@@ -41,10 +41,16 @@ public final class HazelcastConfigCenter {
     public static final String CONFIG_IMAP_NAME = "lingframe-governance-config";
     private static final String VIRTUAL_LING_ID = "seatunnel";
 
+    /** 作业级灵元 ID 前缀：`seatunnel-job-{jobId}`。 */
+    public static final String JOB_LING_PREFIX = "seatunnel-job-";
+    /** 作业级配置 key 前缀：`job.{jobId}.{bareKey}`（缺省回退全局裸 key）。 */
+    private static final String JOB_KEY_PREFIX = "job.";
+
     static final String KEY_RATE_LIMIT = "rate-limit-per-second";
     static final String KEY_CB_FAILURE_RATE = "circuit-breaker-failure-rate-threshold";
     static final String KEY_CB_SLIDING_WINDOW = "circuit-breaker-sliding-window-size";
     static final String KEY_DEFAULT_TIMEOUT = "default-timeout-ms";
+    static final String KEY_BULKHEAD_MAX_CONCURRENT = "bulkhead-max-concurrent";
 
     private final LingRepository lingRepository;
     private HazelcastInstance hazelcastInstance;
@@ -106,41 +112,97 @@ public final class HazelcastConfigCenter {
 
     /**
      * 从 IMap 读取当前配置并应用到虚拟灵元。
+     * <p>
+     * 初始化时不仅刷共享灵元，同时把全局裸 key 应用到全部已注册作业灵元
+     * （作业级 key 覆盖，缺失回退全局，见 {@link #buildConfigFromMap}）。
      */
     private void applyInitialConfig() {
         if (lingRepository == null || configMap == null) {
             return;
         }
-        final LingRuntime runtime = lingRepository.getRuntime(VIRTUAL_LING_ID);
-        if (runtime == null) {
-            return;
-        }
-        final LingRuntimeConfig newConfig = buildConfigFromMap(runtime.getConfig());
-        runtime.updateConfig(newConfig);
-        log.info("Applied initial config from IMap: rateLimit={}/s, cbFailureRate={}%, slidingWindow={}",
-                newConfig.getRateLimitPerSecond(),
-                newConfig.getCircuitBreakerFailureRateThreshold(),
-                newConfig.getCircuitBreakerSlidingWindowSize());
+        refreshLing(VIRTUAL_LING_ID, null);
+        refreshAllJobLings();
     }
 
     /**
-     * 从 IMap 构建 LingRuntimeConfig，缺失的 key 回退到现有 config 默认值。
+     * 刷新单个灵元配置。globalJobId 为空表示共享灵元（仅读全局裸 key）；
+     * 非空表示作业灵元（先读 `job.{jobId}.{bareKey}` 覆盖，缺省回退全局裸 key）。
      */
-    private LingRuntimeConfig buildConfigFromMap(LingRuntimeConfig fallback) {
+    private void refreshLing(String lingId, String globalJobId) {
+        if (lingRepository == null || configMap == null) {
+            return;
+        }
+        final LingRuntime runtime = lingRepository.getRuntime(lingId);
+        if (runtime == null) {
+            log.debug("Ling [{}] not registered, skip config refresh", lingId);
+            return;
+        }
+        try {
+            final LingRuntimeConfig newConfig = buildConfigFromMap(runtime.getConfig(), globalJobId);
+            runtime.updateConfig(newConfig);
+            log.info("Ling [{}] config refreshed: rateLimit={}/s, cbFailureRate={}%, slidingWindow={}, bulkheadMaxConcurrent={}",
+                    lingId,
+                    newConfig.getRateLimitPerSecond(),
+                    newConfig.getCircuitBreakerFailureRateThreshold(),
+                    newConfig.getCircuitBreakerSlidingWindowSize(),
+                    newConfig.getBulkheadMaxConcurrent());
+        } catch (Exception e) {
+            log.warn("Failed to refresh ling [{}] config: {}", lingId, e.getMessage());
+        }
+    }
+
+    /** 刷新全部已注册作业灵元（`seatunnel-job-*`），把全局裸 key 变更广播到各作业。 */
+    private void refreshAllJobLings() {
+        for (LingRuntime rt : lingRepository.getAllRuntimes()) {
+            final String id = rt.getLingId();
+            if (id != null && id.startsWith(JOB_LING_PREFIX)) {
+                refreshLing(id, id.substring(JOB_LING_PREFIX.length()));
+            }
+        }
+    }
+
+    /**
+     * 从 IMap 构建 LingRuntimeConfig，缺失的 key 回退到打包时的默认值。
+     * <p>
+     * globalJobId 非空时，每个 key 先读作业级 {@code job.{jobId}.{bareKey}}，
+     * 缺省再回退全局裸 key/{@code fallback}——作业级配置缺省逐级回退全局，符合 opt-in 语义。
+     */
+    private LingRuntimeConfig buildConfigFromMap(LingRuntimeConfig fallback, String globalJobId) {
         final LingRuntimeConfig.LingRuntimeConfigBuilder builder = LingRuntimeConfig.builder()
                 .maxHistorySnapshots(fallback.getMaxHistorySnapshots())
-                .bulkheadMaxConcurrent(fallback.getBulkheadMaxConcurrent());
+                // 修复：bulkhead-max-concurrent 此前硬编码随 fallback（不热刷），
+                // 运维无法动态调整舱壁并发。现纳入 IMap 热刷 key 集合（缺省仍回退现有值）。
+                .bulkheadMaxConcurrent(parseInt(
+                        cfgKey(configMap, globalJobId, KEY_BULKHEAD_MAX_CONCURRENT), fallback.getBulkheadMaxConcurrent()));
 
         builder.rateLimitPerSecond(parseInt(
-                configMap.get(KEY_RATE_LIMIT), fallback.getRateLimitPerSecond()));
+                cfgKey(configMap, globalJobId, KEY_RATE_LIMIT), fallback.getRateLimitPerSecond()));
         builder.circuitBreakerFailureRateThreshold(parseInt(
-                configMap.get(KEY_CB_FAILURE_RATE), fallback.getCircuitBreakerFailureRateThreshold()));
+                cfgKey(configMap, globalJobId, KEY_CB_FAILURE_RATE), fallback.getCircuitBreakerFailureRateThreshold()));
         builder.circuitBreakerSlidingWindowSize(parseInt(
-                configMap.get(KEY_CB_SLIDING_WINDOW), fallback.getCircuitBreakerSlidingWindowSize()));
+                cfgKey(configMap, globalJobId, KEY_CB_SLIDING_WINDOW), fallback.getCircuitBreakerSlidingWindowSize()));
         builder.defaultTimeoutMs(parseInt(
-                configMap.get(KEY_DEFAULT_TIMEOUT), fallback.getDefaultTimeoutMs()));
+                cfgKey(configMap, globalJobId, KEY_DEFAULT_TIMEOUT), fallback.getDefaultTimeoutMs()));
 
         return builder.build();
+    }
+
+    /**
+     * 取 IMap 中某个治理 key 的值（作业级优先，全局回退）。
+     *
+     * @param map          配置 IMap
+     * @param globalJobId  非空表示作业级 key `job.{jobId}.{bareKey}` 优先；空表示仅读全局裸 key
+     * @param bareKey      全局裸 key（如 {@link #KEY_RATE_LIMIT}）
+     * @return 优先取值；两级均缺失返回 null，由调用方回退 fallback
+     */
+    private static String cfgKey(IMap<String, String> map, String globalJobId, String bareKey) {
+        if (globalJobId != null) {
+            final String jobLevelValue = map.get(JOB_KEY_PREFIX + globalJobId + "." + bareKey);
+            if (jobLevelValue != null) {
+                return jobLevelValue;
+            }
+        }
+        return map.get(bareKey);
     }
 
     private static int parseInt(String value, int fallback) {
@@ -190,49 +252,58 @@ public final class HazelcastConfigCenter {
         final List<UUID> ids = new ArrayList<>();
         ids.add(map.addEntryListener((EntryAddedListener<String, String>) event -> {
             log.info("Config entry added: {} = {}", event.getKey(), event.getValue());
-            refreshVirtualLingConfig();
+            refreshConfig(event.getKey());
         }, true));
         ids.add(map.addEntryListener((EntryUpdatedListener<String, String>) event -> {
             log.info("Config entry updated: {} = {}", event.getKey(), event.getValue());
-            refreshVirtualLingConfig();
+            refreshConfig(event.getKey());
         }, true));
         ids.add(map.addEntryListener((EntryRemovedListener<String, String>) event -> {
             log.info("Config entry removed: {}", event.getKey());
-            refreshVirtualLingConfig();
+            refreshConfig(event.getKey());
         }, true));
         ids.add(map.addEntryListener((EntryEvictedListener<String, String>) event -> {
             log.info("Config entry evicted: {}", event.getKey());
-            refreshVirtualLingConfig();
+            refreshConfig(event.getKey());
         }, true));
         ids.add(map.addEntryListener((EntryExpiredListener<String, String>) event -> {
             log.info("Config entry expired: {}", event.getKey());
-            refreshVirtualLingConfig();
+            refreshConfig(event.getKey());
         }, true));
         return ids;
     }
 
     /**
-     * 配置变更时更新虚拟灵元的 LingRuntimeConfig。
+     * 配置变更时按 key 类型路由刷新：
+     * <ul>
+     *   <li>{@code job.{jobId}.{bareKey}} 作业级 key → 仅刷新该作业灵元（作业级覆盖全局）；</li>
+     *   <li>其余（全局裸 key / 未知）→ 刷新共享灵元 + 全部已注册作业灵元（全局广播）。</li>
+     * </ul>
      */
-    private void refreshVirtualLingConfig() {
+    private void refreshConfig(String changedKey) {
         if (lingRepository == null || configMap == null) {
             return;
         }
-        final LingRuntime runtime = lingRepository.getRuntime(VIRTUAL_LING_ID);
-        if (runtime == null) {
-            log.debug("Virtual ling [{}] not registered, skip config refresh", VIRTUAL_LING_ID);
-            return;
+        if (changedKey != null && changedKey.startsWith(JOB_KEY_PREFIX)) {
+            final String jobId = parseJobIdFromKey(changedKey);
+            if (jobId != null) {
+                refreshLing(JOB_LING_PREFIX + jobId, jobId);
+                return;
+            }
         }
-        try {
-            final LingRuntimeConfig newConfig = buildConfigFromMap(runtime.getConfig());
-            runtime.updateConfig(newConfig);
-            log.info("Virtual ling [{}] config refreshed: rateLimit={}/s, cbFailureRate={}%, slidingWindow={}",
-                    VIRTUAL_LING_ID,
-                    newConfig.getRateLimitPerSecond(),
-                    newConfig.getCircuitBreakerFailureRateThreshold(),
-                    newConfig.getCircuitBreakerSlidingWindowSize());
-        } catch (Exception e) {
-            log.warn("Failed to refresh virtual ling config: {}", e.getMessage());
+        refreshLing(VIRTUAL_LING_ID, null);
+        refreshAllJobLings();
+    }
+
+    /**
+     * 从作业级 key `job.{jobId}.{bareKey}` 解析 jobId；格式异常返回 null。
+     */
+    private static String parseJobIdFromKey(String key) {
+        final int dot = key.indexOf('.', JOB_KEY_PREFIX.length());
+        if (dot < 0) {
+            return null;
         }
+        final String jobId = key.substring(JOB_KEY_PREFIX.length(), dot);
+        return jobId.isEmpty() ? null : jobId;
     }
 }

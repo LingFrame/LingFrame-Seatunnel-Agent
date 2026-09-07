@@ -1,0 +1,25 @@
+# JMH「完整 SeaTunnel 版」基准专用治理配置
+# 用法：-javaagent:<lingframe-seatunnel-agent.jar>=<本文件绝对路径>
+#
+# 测的是什么：开启 governance + task-execution-advice-enabled + per-job-governance-enabled，
+# 织入真实 AbstractTask.call()，每批次穿透「作业级治理」链路（Bridge 分发 + JobIdExtractor 解析
+# + JobLingRegistry 解析/touch + InvocationContext 池 + Pipeline Filter 链 + LingHealthMetrics 回灌）。
+# wovenCall（固定 jobId）测单作业 per-job 热路径，wovenPerJobCall（多作业轮转）测多作业规模下的
+# 注册表热路径——两者对照 plainCall 得出 M2 作业级治理的附加拦截损耗。
+#
+# 为什么弹性组件保持开启：per-job 装配依赖 virtualLingManager（resilience 开启才创建）。
+# 防污染口径的关停措施：rate-limit-per-second 拉到 100000/s（令牌桶配额远超基准吞吐，tryAcquire
+# 恒成功不触发限流 sleep）；熔断器无失败喂入（基准恒成功）永不 OPEN、无退避——弹性组件仅保留
+# 其热路径开销，不产生主动拦停动作，仍测「纯拦截损耗」。
+governance:
+  enabled: true
+  task-execution-advice-enabled: true
+  per-job-governance-enabled: true
+  per-job-max-tracked-jobs: 4096
+  resilience:
+    circuit-breaker-enabled: true
+    rate-limiter-enabled: true
+    circuit-breaker-failure-rate-threshold: 50
+    circuit-breaker-sliding-window-size: 20
+    circuit-breaker-minimum-number-of-calls: 10
+    rate-limit-per-second: 100000

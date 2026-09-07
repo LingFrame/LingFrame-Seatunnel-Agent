@@ -68,6 +68,22 @@ class AgentPipelineFactoryTest {
         }
 
         @Test
+        @DisplayName("resilience 启用时应暴露 VirtualLingManager，供作业级治理装配")
+        void shouldExposeVirtualLingManagerWhenResilienceEnabled() {
+            final AgentConfig config = TestAgentConfigs.create(true, true, true, false, false, true);
+            final AgentGovernanceRuntime runtime = AgentPipelineFactory.create(config);
+            assertThat(runtime.getVirtualLingManager()).isNotNull();
+        }
+
+        @Test
+        @DisplayName("resilience 关闭时 VirtualLingManager 应为 null")
+        void shouldNotExposeVirtualLingManagerWhenResilienceDisabled() {
+            final AgentConfig config = TestAgentConfigs.create(true, false, false, false, false, true);
+            final AgentGovernanceRuntime runtime = AgentPipelineFactory.create(config);
+            assertThat(runtime.getVirtualLingManager()).isNull();
+        }
+
+        @Test
         @DisplayName("虚拟灵元 config 应包含限流和熔断参数")
         void shouldContainResilienceParams() {
             final AgentConfig config = TestAgentConfigs.create(true, true, true, false, false, true);

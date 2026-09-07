@@ -30,7 +30,7 @@ class ClassLoaderReleaseAdviceTest {
     static void setupBridge() {
         final AgentConfig config = TestAgentConfigs.create(true, true, true, false, false, false);
         final InvocationPipelineEngine pipeline = new InvocationPipelineEngine(null);
-        LingFrameAgentBridge.registerContract(new SeaTunnelAdapter(config, pipeline, null, null, null, null, null));
+        LingFrameAgentBridge.registerContract(new SeaTunnelAdapter(config, pipeline, null, null, null, null));
     }
 
     @AfterAll

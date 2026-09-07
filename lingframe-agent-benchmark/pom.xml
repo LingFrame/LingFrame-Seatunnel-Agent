@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.lingframe.agent</groupId>
+        <artifactId>lingframe-seatunnel-agent</artifactId>
+        <version>0.1.0</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>lingframe-agent-benchmark</artifactId>
+    <packaging>jar</packaging>
+
+    <name>LingFrame Agent :: Benchmark</name>
+    <description>JMH 基准模块：fork JVM + -javaagent 织入真实 SeaTunnel AbstractTask.call()，实测 Agent 拦截损耗（job 级总耗时膨胀 + 单 worker CPU 增量口径）</description>
+
+    <!--
+      本模块为【本机专用】基准模块，不做通用发布：
+      - SeaTunnel engine-* 3.0.0-SNAPSHOT 的已发布 pom 会把 engine-ui / checkpoint-storage-hdfs /
+        seatunnel-config-sql / jetty 等重型 test/dev 依赖树拉进解析（离线环境必然失败），
+        因此改用 system scope 直引本地仓库中预先构建好的精简 jar（只含 AbstractTask / TaskLocation /
+        ProgressState / ConnectorJarIdentifier 等织入目标类）。
+      - 若在其他机器构建，请先确保上述 jar 存在于 D:/MavenRepository（或修改下方 repo.root）。
+      - 不参与常规 reactor 全量发布构建：CI/他人构建请使用 `-pl '!lingframe-agent-benchmark'` 排除。
+    -->
+
+    <properties>
+        <jmh.version>1.37</jmh.version>
+        <!-- 本机 Maven 本地仓库（与 ~/.m2 不同，全项目统一使用 D:/MavenRepository） -->
+        <repo.root>D:/MavenRepository</repo.root>
+    </properties>
+
+    <dependencies>
+        <!-- JMH 基准框架本体 -->
+        <dependency>
+            <groupId>org.openjdk.jmh</groupId>
+            <artifactId>jmh-core</artifactId>
+            <version>${jmh.version}</version>
+        </dependency>
+        <!-- @Benchmark 注解处理器：编译期生成 META-INF/BenchmarkList（JMH 运行期发现基准的凭据） -->
+        <dependency>
+            <groupId>org.openjdk.jmh</groupId>
+            <artifactId>jmh-generator-annprocess</artifactId>
+            <version>${jmh.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <!-- slf4j 控制台绑定：让 fork JVM 里 Agent premain 的 WARN/INFO 日志可见，用于确认织入已生效 -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>${slf4j.version}</version>
+        </dependency>
+
+        <!-- ===== SeaTunnel 织入目标类（system scope 本机直引，见文件头注释） ===== -->
+        <!-- engine-server：AbstractTask / TaskLocation / TaskGroupLocation / ProgressState / Task -->
+        <dependency>
+            <groupId>org.apache.seatunnel</groupId>
+            <artifactId>seatunnel-engine-server</artifactId>
+            <version>3.0.0-SNAPSHOT</version>
+            <scope>system</scope>
+            <systemPath>${repo.root}/org/apache/seatunnel/seatunnel-engine-server/3.0.0-SNAPSHOT/seatunnel-engine-server-3.0.0-SNAPSHOT.jar</systemPath>
+        </dependency>
+        <!-- engine-core：ConnectorJarIdentifier / DefaultClassLoaderService -->
+        <dependency>
+            <groupId>org.apache.seatunnel</groupId>
+            <artifactId>seatunnel-engine-core</artifactId>
+            <version>3.0.0-SNAPSHOT</version>
+            <scope>system</scope>
+            <systemPath>${repo.root}/org/apache/seatunnel/seatunnel-engine-core/3.0.0-SNAPSHOT/seatunnel-engine-core-3.0.0-SNAPSHOT.jar</systemPath>
+        </dependency>
+        <!-- engine-common：AbstractTask 字段类型 CompletableFuture 所在包 -->
+        <dependency>
+            <groupId>org.apache.seatunnel</groupId>
+            <artifactId>seatunnel-engine-common</artifactId>
+            <version>3.0.0-SNAPSHOT</version>
+            <scope>system</scope>
+            <systemPath>${repo.root}/org/apache/seatunnel/seatunnel-engine-common/3.0.0-SNAPSHOT/seatunnel-engine-common-3.0.0-SNAPSHOT.jar</systemPath>
+        </dependency>
+        <!-- seatunnel-api / seatunnel-common：Task/AbstractTask 方法签名中的 SPI 类型 -->
+        <dependency>
+            <groupId>org.apache.seatunnel</groupId>
+            <artifactId>seatunnel-api</artifactId>
+            <version>3.0.0-SNAPSHOT</version>
+            <scope>system</scope>
+            <systemPath>${repo.root}/org/apache/seatunnel/seatunnel-api/3.0.0-SNAPSHOT/seatunnel-api-3.0.0-SNAPSHOT.jar</systemPath>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.seatunnel</groupId>
+            <artifactId>seatunnel-common</artifactId>
+            <version>3.0.0-SNAPSHOT</version>
+            <scope>system</scope>
+            <systemPath>${repo.root}/org/apache/seatunnel/seatunnel-common/3.0.0-SNAPSHOT/seatunnel-common-3.0.0-SNAPSHOT.jar</systemPath>
+        </dependency>
+        <!-- seatunnel-shade-hazelcast：TaskLocation 实现 com.hazelcast.nio.serialization.IdentifiedDataSerializable，类加载需 hazelcast -->
+        <dependency>
+            <groupId>org.apache.seatunnel</groupId>
+            <artifactId>seatunnel-shade-hazelcast</artifactId>
+            <version>5.1-3.0.0</version>
+            <scope>system</scope>
+            <systemPath>${repo.root}/org/apache/seatunnel/seatunnel-shade-hazelcast/5.1-3.0.0/seatunnel-shade-hazelcast-5.1-3.0.0.jar</systemPath>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 本模块产物为普通 thin jar（含 target/classes 下的 META-INF/BenchmarkList），
+                 运行期 classpath 由 run-benchmark.sh 显式拼装，避免 shade 合并冲突 -->
+        </plugins>
+    </build>
+</project>

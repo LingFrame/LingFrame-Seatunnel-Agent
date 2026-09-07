@@ -20,6 +20,9 @@ class TaskExecutionAdviceTest {
     private TaskExecutionAdviceTest() {
     }
 
+    /** 伪任务宿主：仅用于验证透传链路（@Advice.This 赋值）。 */
+    private static final Object DUMMY_TASK = new Object();
+
     @BeforeEach
     void clearContract() {
         LingFrameAgentBridge.registerContract(null);
@@ -37,19 +40,19 @@ class TaskExecutionAdviceTest {
         @Test
         @DisplayName("onCallEnter 无契约时应安全跳过不抛异常")
         void shouldSafelySkipOnCallEnterWhenNoContract() {
-            TaskExecutionAdvice.onCallEnter();
+            TaskExecutionAdvice.onCallEnter(DUMMY_TASK);
         }
 
         @Test
         @DisplayName("onCallExit 无契约时应安全跳过不抛异常")
         void shouldSafelySkipOnCallExitWhenNoContract() {
-            TaskExecutionAdvice.onCallExit(null);
+            TaskExecutionAdvice.onCallExit(null, DUMMY_TASK);
         }
 
         @Test
         @DisplayName("onCallExit 无契约且带异常时应安全跳过不抛异常")
         void shouldSafelySkipOnCallExitWithErrorWhenNoContract() {
-            TaskExecutionAdvice.onCallExit(new RuntimeException("test"));
+            TaskExecutionAdvice.onCallExit(new RuntimeException("test"), DUMMY_TASK);
         }
     }
 
@@ -58,31 +61,33 @@ class TaskExecutionAdviceTest {
     class ContractDelegation {
 
         @Test
-        @DisplayName("onCallEnter 应委托调用 beforeTaskCall")
+        @DisplayName("onCallEnter 应委托调用 beforeTaskCall 并透传 task")
         void shouldDelegateBeforeTaskCall() {
             final CallRecordingContract contract = new CallRecordingContract();
             LingFrameAgentBridge.registerContract(contract);
-            TaskExecutionAdvice.onCallEnter();
+            TaskExecutionAdvice.onCallEnter(DUMMY_TASK);
             assertThat(contract.beforeCallCount.get()).isEqualTo(1);
+            assertThat(contract.lastTask).isSameAs(DUMMY_TASK);
         }
 
         @Test
-        @DisplayName("onCallExit 无异常时应委托调用 afterTaskCall(null)")
+        @DisplayName("onCallExit 无异常时应委托调用 afterTaskCall")
         void shouldDelegateAfterTaskCallWithNullError() {
             final CallRecordingContract contract = new CallRecordingContract();
             LingFrameAgentBridge.registerContract(contract);
-            TaskExecutionAdvice.onCallExit(null);
+            TaskExecutionAdvice.onCallExit(null, DUMMY_TASK);
             assertThat(contract.afterCallCount.get()).isEqualTo(1);
             assertThat(contract.lastError).isNull();
+            assertThat(contract.lastTask).isSameAs(DUMMY_TASK);
         }
 
         @Test
-        @DisplayName("onCallExit 带异常时应委托调用 afterTaskCall(error)")
+        @DisplayName("onCallExit 带异常时应委托调用 afterTaskCall")
         void shouldDelegateAfterTaskCallWithError() {
             final CallRecordingContract contract = new CallRecordingContract();
             LingFrameAgentBridge.registerContract(contract);
             final RuntimeException error = new RuntimeException("batch failed");
-            TaskExecutionAdvice.onCallExit(error);
+            TaskExecutionAdvice.onCallExit(error, DUMMY_TASK);
             assertThat(contract.afterCallCount.get()).isEqualTo(1);
             assertThat(contract.lastError).isSameAs(error);
         }
@@ -93,8 +98,8 @@ class TaskExecutionAdviceTest {
             final CallRecordingContract contract = new CallRecordingContract();
             LingFrameAgentBridge.registerContract(contract);
             for (int i = 0; i < 5; i++) {
-                TaskExecutionAdvice.onCallEnter();
-                TaskExecutionAdvice.onCallExit(null);
+                TaskExecutionAdvice.onCallEnter(DUMMY_TASK);
+                TaskExecutionAdvice.onCallExit(null, DUMMY_TASK);
             }
             assertThat(contract.beforeCallCount.get()).isEqualTo(5);
             assertThat(contract.afterCallCount.get()).isEqualTo(5);
@@ -105,6 +110,7 @@ class TaskExecutionAdviceTest {
 
         final AtomicInteger beforeCallCount = new AtomicInteger();
         final AtomicInteger afterCallCount = new AtomicInteger();
+        volatile Object lastTask;
         volatile Throwable lastError;
 
         @Override
@@ -122,13 +128,15 @@ class TaskExecutionAdviceTest {
         }
 
         @Override
-        public void beforeTaskCall() {
+        public void beforeTaskCall(Object task) {
             beforeCallCount.incrementAndGet();
+            lastTask = task;
         }
 
         @Override
-        public void afterTaskCall(Throwable error) {
+        public void afterTaskCall(Object task, Throwable error) {
             afterCallCount.incrementAndGet();
+            lastTask = task;
             lastError = error;
         }
     }
