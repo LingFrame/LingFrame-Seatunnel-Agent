@@ -18,9 +18,7 @@ import com.lingframe.core.pipeline.InvocationPipelineEngine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.net.URL;
-import java.net.URLClassLoader;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Locale;
@@ -145,7 +143,6 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
             unloadCoordinator.onFailureCleanup(classLoader);
             log.debug("Unload coordinator completed JVM-level cleanup");
         }
-        closeUrlClassLoaderIfPossible(classLoader);
     }
 
     @Override
@@ -520,17 +517,6 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
         }
     }
 
-
-    private void closeUrlClassLoaderIfPossible(ClassLoader classLoader) {
-        if (classLoader instanceof URLClassLoader) {
-            try {
-                ((URLClassLoader) classLoader).close();
-                log.debug("Closed URLClassLoader");
-            } catch (IOException e) {
-                log.warn("Failed to close URLClassLoader: {}", e.getMessage());
-            }
-        }
-    }
 
     /* ==================== 可观测性 getter（供 JMX MBean 读取） ==================== */
 

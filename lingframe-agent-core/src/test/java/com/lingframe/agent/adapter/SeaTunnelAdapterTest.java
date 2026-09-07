@@ -64,8 +64,8 @@ class SeaTunnelAdapterTest {
         }
 
         @Test
-        @DisplayName("URLClassLoader 应被正常关闭")
-        void shouldCloseUrlClassLoader() throws Exception {
+        @DisplayName("非 null ClassLoader 应正确注册到 ReleasedClassLoaderRegistry")
+        void shouldRegisterReleasedClassLoader() throws Exception {
             final AgentConfig config = TestAgentConfigs.create(true, true, true, false, false, false);
             final SeaTunnelAdapter adapter = new SeaTunnelAdapter(config, null, null, null, null, null);
 
