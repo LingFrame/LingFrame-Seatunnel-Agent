@@ -48,7 +48,7 @@ governance:
 
 ## JMX 可观测性
 
-注册 MBean `com.lingframe.agent:type=Observability`，jconsole/jcmd 可读：
+注册 MBean `cn.lingframe.agent:type=Observability`，jconsole/jcmd 可读：
 - advice 安装状态 + 目标类存在性（防上游重构静默失效）
 - EventBus 队列/丢弃/提交数
 - per-call 钩子耗时 min/avg/max/count（timing-enabled=true 时）

@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.lingframe.agent</groupId>
+        <groupId>cn.lingframe.agent</groupId>
         <artifactId>lingframe-seatunnel-agent</artifactId>
         <version>0.1.0</version>
         <relativePath>../pom.xml</relativePath>
@@ -28,12 +28,12 @@
              本地仓库旧版 core 类（如 MethodHandle 版 JobIdExtractor），在 JDK17 下提取 jobID 失败，
              造成 M2 验收假性失败。AgentJarManifestTest 通过文件路径读 dist jar，无需 classpath 依赖。 -->
         <dependency>
-            <groupId>com.lingframe.agent</groupId>
+            <groupId>cn.lingframe.agent</groupId>
             <artifactId>lingframe-agent-core</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>com.lingframe.agent</groupId>
+            <groupId>cn.lingframe.agent</groupId>
             <artifactId>lingframe-agent-bridge</artifactId>
             <scope>test</scope>
         </dependency>

@@ -177,7 +177,7 @@ premain 运行时指纹探测 `AbstractTask.jobID` 字段：
 
 ## 8. 可观测性
 
-- **JMX**：`com.lingframe.agent:type=Observability`（jconsole/jcmd 直读）——`JobIdExtractor` 能力位（INSTALLED / UNSUPPORTED_VERSION / NO_RUNTIME / DISABLED）、advice 状态、rejectedCount / budgetExhaustedCount / breakerState / gateStatus；
+- **JMX**：`cn.lingframe.agent:type=Observability`（jconsole/jcmd 直读）——`JobIdExtractor` 能力位（INSTALLED / UNSUPPORTED_VERSION / NO_RUNTIME / DISABLED）、advice 状态、rejectedCount / budgetExhaustedCount / breakerState / gateStatus；
 - **日志关键点**（英文，可 grep）：
   - `Hazelcast config center initialized on instance [...], IMap [...], listeners [...]`
   - `Config entry updated: {key} = {value}`（热刷审计）
