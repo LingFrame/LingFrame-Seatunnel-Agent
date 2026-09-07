@@ -7,13 +7,13 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.nio.file.Files;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * 元空间审计解析逻辑与日志管道的本地离线单元测试。
@@ -95,7 +95,7 @@ class MetaspaceAuditOfflineTest {
     void testDefensiveAssertionInterceptsFalseZeroOrSmallValues() {
         // 场景 1：如果 baseline 为 0，必须被强断言拦截并抛出 AssertionError
         final long fakeZeroBaseline = 0L;
-        org.junit.jupiter.api.Assertions.assertThrows(AssertionError.class, () -> {
+        assertThrows(AssertionError.class, () -> {
             assertThat(fakeZeroBaseline)
                     .as("Baseline Metaspace must be > 10MB")
                     .isGreaterThan(10 * 1024 * 1024L);
@@ -103,7 +103,7 @@ class MetaspaceAuditOfflineTest {
 
         // 场景 2：如果抓取到非 SeaTunnel 的空进程（如 5MB），也必须被强断言拦截
         final long fakeSmallBaseline = 5 * 1024 * 1024L;
-        org.junit.jupiter.api.Assertions.assertThrows(AssertionError.class, () -> {
+        assertThrows(AssertionError.class, () -> {
             assertThat(fakeSmallBaseline)
                     .as("Baseline Metaspace must be > 10MB")
                     .isGreaterThan(10 * 1024 * 1024L);
