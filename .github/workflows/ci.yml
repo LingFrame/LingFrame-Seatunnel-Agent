@@ -31,9 +31,7 @@ jobs:
 
 
       - name: Build & Quality Gate
-        # lingframe-agent-benchmark 为本机专用基准模块（system scope 直引本机 SeaTunnel 精简 jar，见其 pom 注释），
-        # 必须从常规 reactor 排除，否则 CI runner 无法解析 D:/MavenRepository 路径
-        run: mvn -B clean verify -Pintegration-check -pl '!lingframe-agent-benchmark'
+        run: mvn -B clean verify -Pintegration-check
 
       - name: Upload JaCoCo Report
         if: always()
