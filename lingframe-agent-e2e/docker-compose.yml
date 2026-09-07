@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   seatunnel-server:
-    image: apache/seatunnel:2.3.8
+    image: apache/seatunnel:2.3.13
     container_name: seatunnel-server
     ports:
       - "5801:5801"

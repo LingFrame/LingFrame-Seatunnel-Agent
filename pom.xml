@@ -25,7 +25,6 @@
         <module>lingframe-agent-core</module>
         <module>lingframe-agent-dist</module>
         <module>lingframe-agent-e2e</module>
-        <module>lingframe-agent-benchmark</module>
     </modules>
 
     <properties>
@@ -36,6 +35,7 @@
         <maven.compiler.parameters>true</maven.compiler.parameters>
 
         <lingframe.version>0.4.5</lingframe.version>
+        <seatunnel.version>2.3.13</seatunnel.version>
         <bytebuddy.version>1.14.12</bytebuddy.version>
         <slf4j.version>1.7.36</slf4j.version>
         <snakeyaml.version>1.33</snakeyaml.version>
@@ -288,6 +288,14 @@
     </build>
 
     <profiles>
+        <!-- 本机专用基准测试模块（直引本机 SeaTunnel 精简 jar），通过 -Pbenchmark 显式激活，避免影响默认 Reactor 与 CI 构建 -->
+        <profile>
+            <id>benchmark</id>
+            <modules>
+                <module>lingframe-agent-benchmark</module>
+            </modules>
+        </profile>
+
         <profile>
             <id>integration-check</id>
             <build>

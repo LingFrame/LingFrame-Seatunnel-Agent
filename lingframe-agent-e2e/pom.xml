@@ -18,7 +18,7 @@
     <description>端到端测试：拉起 SeaTunnel 集群，验证 Agent 治理效果</description>
 
     <properties>
-        <seatunnel.version>2.3.8</seatunnel.version>
+        <seatunnel.version>2.3.13</seatunnel.version>
         <jacoco.skip>true</jacoco.skip>
     </properties>
 
