@@ -61,6 +61,7 @@ services:
       - SEATUNNEL_HOME=/opt/seatunnel
     volumes:
       - ./src/test/resources/seatunnel.yaml:/opt/seatunnel/config/seatunnel.yaml
+      - ./src/test/resources/hazelcast.yaml:/opt/seatunnel/config/hazelcast.yaml
       - ./src/test/resources/lingframe-governance.yaml:/opt/seatunnel/config/lingframe-governance.yaml
       - ../lingframe-agent-dist/target/lingframe-seatunnel-agent.jar:/opt/seatunnel/lib/lingframe-seatunnel-agent.jar
       - ./target/connectors/seatunnel:/opt/seatunnel/connectors/seatunnel
