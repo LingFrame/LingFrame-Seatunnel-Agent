@@ -65,14 +65,14 @@ jobs:
 
 
       - name: Build Agent Fat-Jar
-        run: mvn -B clean package -DskipTests -pl lingframe-agent-bridge,lingframe-agent-core,lingframe-agent-dist -am
+        run: mvn -B clean install -DskipTests -pl lingframe-agent-bridge,lingframe-agent-core,lingframe-agent-dist -am
 
       - name: Run E2E Tests
         run: |
           cd lingframe-agent-e2e
           docker compose up -d
           sleep 30
-          mvn -B verify -pl lingframe-agent-e2e
+          mvn -B verify
           docker compose down -v
 
   publish-release:
