@@ -1,5 +1,5 @@
 hazelcast:
-  cluster-name: seatunnel
+  cluster-name: seatunnel-agent
   network:
     rest-api:
       enabled: true

@@ -3,6 +3,8 @@ package com.lingframe.agent.e2e;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -14,6 +16,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -37,31 +40,145 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DisplayName("Metaspace 零泄漏全正交矩阵与并发验证")
 class MetaspaceLeakIT {
 
-    private static final String SEATUNNEL_REST_URL = "http://localhost:5801/hazelcast/rest/maps/submit-job";
-    private static final String CONTAINER_NAME = "seatunnel-server";
+    private static final Logger log = LoggerFactory.getLogger(MetaspaceLeakIT.class);
+
+    private static final String AGENT_REST_URL = "http://localhost:5801/hazelcast/rest/maps/submit-job";
+    private static final String AGENT_CONTAINER_NAME = "seatunnel-server";
+
+    private static final String NATIVE_REST_URL = "http://localhost:5802/hazelcast/rest/maps/submit-job";
+    private static final String NATIVE_CONTAINER_NAME = "seatunnel-native";
+
     private static final long METASPACE_GROWTH_THRESHOLD_BYTES = 15 * 1024 * 1024L;
+    private static final long MAX_NET_OVERHEAD_BYTES = 2 * 1024 * 1024L;
 
     private static final Pattern METASPACE_USED_PATTERN =
             Pattern.compile("Metaspace.*?used\\s*=\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
 
+    static final class MetaspaceAuditResult {
+        private final long baseline;
+        private final long round1;
+        private final long round2;
+        private final long finalUsed;
+        private final long netGrowth;
+
+        MetaspaceAuditResult(long baseline, long round1, long round2, long finalUsed) {
+            this.baseline = baseline;
+            this.round1 = round1;
+            this.round2 = round2;
+            this.finalUsed = finalUsed;
+            this.netGrowth = finalUsed - baseline;
+        }
+
+        public long getBaseline() {
+            return baseline;
+        }
+
+        public long getRound1() {
+            return round1;
+        }
+
+        public long getRound2() {
+            return round2;
+        }
+
+        public long getFinalUsed() {
+            return finalUsed;
+        }
+
+        public long getNetGrowth() {
+            return netGrowth;
+        }
+    }
+
+    private static String formatMb(long bytes) {
+        return String.format(Locale.ROOT, "%.2f MB", bytes / (1024.0 * 1024.0));
+    }
+
     @Test
     @DisplayName("全正交 9 组矩阵 + 多 Job 异构并发压测后 Metaspace 应完全收敛零泄漏")
     void shouldNotLeakMetaspaceUnderFullMatrixAndConcurrency() throws Exception {
-        Assumptions.assumeTrue(isDockerContainerRunning(),
-                "Docker daemon or '" + CONTAINER_NAME + "' container is not available, skipping MetaspaceLeakIT");
+        Assumptions.assumeTrue(isDockerContainerRunning(AGENT_CONTAINER_NAME),
+                "Docker daemon or '" + AGENT_CONTAINER_NAME + "' container is not available, skipping MetaspaceLeakIT");
 
-        // 1. 基线采样：记录初始 Metaspace
-        forceFullGcInContainer();
-        final long metaspaceBaseline = getCurrentMetaspaceUsed();
-
-        // 2. 阶段一：执行 3×3 全正交 9 组作业矩阵（每组执行 2 轮，确保自闭环且发生卸载）
         final List<String> matrixJobs = buildOrthogonalMatrixJobConfigs();
+        final boolean isNativeRunning = isDockerContainerRunning(NATIVE_CONTAINER_NAME);
+
+        MetaspaceAuditResult nativeResult = null;
+        if (isNativeRunning) {
+            log.info("Starting Control Group benchmark on native SeaTunnel (without agent)...");
+            nativeResult = runTestMatrixAndAudit("Native-Control", NATIVE_REST_URL, NATIVE_CONTAINER_NAME, matrixJobs);
+        } else {
+            log.warn("Control Group container '{}' is not running, skipping A/B delta comparison", NATIVE_CONTAINER_NAME);
+        }
+
+        log.info("Starting Treatment Group benchmark on SeaTunnel with LingFrame Agent...");
+        final MetaspaceAuditResult agentResult =
+                runTestMatrixAndAudit("Agent-Treatment", AGENT_REST_URL, AGENT_CONTAINER_NAME, matrixJobs);
+
+        if (nativeResult != null) {
+            final long netOverhead = agentResult.getNetGrowth() - nativeResult.getNetGrowth();
+            log.info("==================== [Metaspace A/B Audit Report] ====================");
+            log.info("Native Baseline: {} | Agent Baseline: {} | Baseline Delta: {}",
+                    formatMb(nativeResult.getBaseline()), formatMb(agentResult.getBaseline()),
+                    formatMb(agentResult.getBaseline() - nativeResult.getBaseline()));
+            log.info("Native Round 1 : {} | Agent Round 1 : {} | Round 1 Delta: {}",
+                    formatMb(nativeResult.getRound1()), formatMb(agentResult.getRound1()),
+                    formatMb(agentResult.getRound1() - nativeResult.getRound1()));
+            log.info("Native Round 2 : {} | Agent Round 2 : {} | Round 2 Delta: {}",
+                    formatMb(nativeResult.getRound2()), formatMb(agentResult.getRound2()),
+                    formatMb(agentResult.getRound2() - nativeResult.getRound2()));
+            log.info("Native Final   : {} | Agent Final   : {} | Final Delta: {}",
+                    formatMb(nativeResult.getFinalUsed()), formatMb(agentResult.getFinalUsed()),
+                    formatMb(agentResult.getFinalUsed() - nativeResult.getFinalUsed()));
+            log.info("Native Growth  : {} | Agent Growth  : {} | Net Overhead: {}",
+                    formatMb(nativeResult.getNetGrowth()), formatMb(agentResult.getNetGrowth()),
+                    formatMb(netOverhead));
+            log.info("Upper Growth Threshold: {} | Max Net Overhead Limit: {}",
+                    formatMb(METASPACE_GROWTH_THRESHOLD_BYTES), formatMb(MAX_NET_OVERHEAD_BYTES));
+            log.info("======================================================================");
+
+            assertThat(netOverhead)
+                    .as("Agent net overhead should be <= %d bytes, actual: %d (nativeGrowth: %d, agentGrowth: %d)",
+                            MAX_NET_OVERHEAD_BYTES, netOverhead, nativeResult.getNetGrowth(), agentResult.getNetGrowth())
+                    .isLessThanOrEqualTo(MAX_NET_OVERHEAD_BYTES);
+        }
+
+        assertThat(agentResult.getNetGrowth())
+                .as("Agent Metaspace growth should be < %d bytes, actual: %d (baseline: %d, final: %d)",
+                        METASPACE_GROWTH_THRESHOLD_BYTES, agentResult.getNetGrowth(),
+                        agentResult.getBaseline(), agentResult.getFinalUsed())
+                .isLessThan(METASPACE_GROWTH_THRESHOLD_BYTES);
+    }
+
+    private MetaspaceAuditResult runTestMatrixAndAudit(
+            String targetLabel,
+            String restUrl,
+            String containerName,
+            List<String> matrixJobs) throws Exception {
+        // 1. 基线采样：记录初始 Metaspace
+        forceFullGcInContainer(containerName);
+        final long baseline = getCurrentMetaspaceUsed(containerName);
+        log.info("[{}] Metaspace audit started: baseline={} bytes ({})",
+                targetLabel, baseline, formatMb(baseline));
+
+        // 2. 阶段一：执行 3×3 全正交 9 组作业矩阵（每组执行 2 轮）
+        long round1Used = 0L;
+        long round2Used = 0L;
         for (int round = 1; round <= 2; round++) {
             for (int i = 0; i < matrixJobs.size(); i++) {
                 final String jobConfig = matrixJobs.get(i);
-                submitJob("matrix-r" + round + "-j" + (i + 1), jobConfig);
-                Thread.sleep(1000); // 间隔让作业执行并触发释放
+                submitJob(restUrl, targetLabel + "-r" + round + "-j" + (i + 1), jobConfig);
+                Thread.sleep(1000);
             }
+            forceFullGcInContainer(containerName);
+            final long rUsed = getCurrentMetaspaceUsed(containerName);
+            if (round == 1) {
+                round1Used = rUsed;
+            } else {
+                round2Used = rUsed;
+            }
+            log.info("[{}] Metaspace progression [Matrix Round {}/2]: used={} bytes ({}), deltaFromBaseline={} bytes ({})",
+                    targetLabel, round, rUsed, formatMb(rUsed), rUsed - baseline, formatMb(rUsed - baseline));
         }
 
         // 3. 阶段二：多 Job 异构并发压测（4 线程并发交错提交不同异构作业）
@@ -76,14 +193,13 @@ class MetaspaceLeakIT {
                     final String jobConfig = matrixJobs.get(j);
                     futures.add(CompletableFuture.runAsync(() -> {
                         try {
-                            submitJob("concurrent-r" + roundIndex + "-j" + jobIndex, jobConfig);
+                            submitJob(restUrl, targetLabel + "-c-r" + roundIndex + "-j" + jobIndex, jobConfig);
                         } catch (Exception e) {
                             throw new RuntimeException("Concurrent job failed", e);
                         }
                     }, executor));
                 }
             }
-            // 等待全部并发作业提交完毕
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(60, TimeUnit.SECONDS);
         } finally {
             executor.shutdown();
@@ -93,16 +209,15 @@ class MetaspaceLeakIT {
         // 4. 等待引擎将所有异步作业生命周期完成与释放
         Thread.sleep(10000);
 
-        // 5. 阶段三：强制 Full GC 并采样 Metaspace
-        forceFullGcInContainer();
-        final long metaspaceAfter = getCurrentMetaspaceUsed();
-        final long growth = metaspaceAfter - metaspaceBaseline;
+        // 5. 阶段三：强制 Full GC 并采样终态 Metaspace
+        forceFullGcInContainer(containerName);
+        final long finalUsed = getCurrentMetaspaceUsed(containerName);
+        final long growth = finalUsed - baseline;
 
-        // 6. 核心断言：经过全矩阵与并发洗礼后，Metaspace 增长应完全收敛在安全阈值（< 15MB）之内
-        assertThat(growth)
-                .as("Metaspace growth after 9-matrix and concurrent jobs should be < %d bytes, actual: %d (baseline: %d, after: %d)",
-                        METASPACE_GROWTH_THRESHOLD_BYTES, growth, metaspaceBaseline, metaspaceAfter)
-                .isLessThan(METASPACE_GROWTH_THRESHOLD_BYTES);
+        log.info("[{}] Metaspace progression [Concurrent Final]: used={} bytes ({}), deltaFromBaseline={} bytes ({})",
+                targetLabel, finalUsed, formatMb(finalUsed), growth, formatMb(growth));
+
+        return new MetaspaceAuditResult(baseline, round1Used, round2Used, finalUsed);
     }
 
 
@@ -196,8 +311,8 @@ class MetaspaceLeakIT {
         return jobs;
     }
 
-    private void submitJob(String jobTag, String jobConfig) throws IOException {
-        final HttpURLConnection conn = (HttpURLConnection) new URL(SEATUNNEL_REST_URL).openConnection();
+    private void submitJob(String restUrl, String jobTag, String jobConfig) throws IOException {
+        final HttpURLConnection conn = (HttpURLConnection) new URL(restUrl).openConnection();
         try {
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
@@ -229,9 +344,9 @@ class MetaspaceLeakIT {
         }
     }
 
-    private void forceFullGcInContainer() {
+    private void forceFullGcInContainer(String containerName) {
         try {
-            final Process p = new ProcessBuilder("docker", "exec", CONTAINER_NAME, "jcmd", "1", "GC.run").start();
+            final Process p = new ProcessBuilder("docker", "exec", containerName, "jcmd", "1", "GC.run").start();
             p.waitFor(5, TimeUnit.SECONDS);
             Thread.sleep(2000);
         } catch (Exception ignored) {
@@ -240,9 +355,9 @@ class MetaspaceLeakIT {
         }
     }
 
-    private long getCurrentMetaspaceUsed() throws Exception {
+    private long getCurrentMetaspaceUsed(String containerName) throws Exception {
         final ProcessBuilder pb = new ProcessBuilder(
-                "docker", "exec", CONTAINER_NAME,
+                "docker", "exec", containerName,
                 "jcmd", "1", "VM.metaspace");
         pb.redirectErrorStream(true);
         final Process p = pb.start();
@@ -272,11 +387,12 @@ class MetaspaceLeakIT {
      * 注意：`docker inspect` 对「容器存在但已停止（Exited）」也会返回退出码 0，
      * 仅凭退出码会误判为运行中；必须解析 {@code {{.State.Running}}} 的输出是否为 {@code true}。
      *
+     * @param containerName 目标容器名
      * @return 容器正在运行返回 true，否则返回 false
      */
-    private static boolean isDockerContainerRunning() {
+    private static boolean isDockerContainerRunning(String containerName) {
         try {
-            final Process p = new ProcessBuilder("docker", "inspect", "-f", "{{.State.Running}}", CONTAINER_NAME)
+            final Process p = new ProcessBuilder("docker", "inspect", "-f", "{{.State.Running}}", containerName)
                     .redirectErrorStream(true)
                     .start();
             final StringBuilder output = new StringBuilder();

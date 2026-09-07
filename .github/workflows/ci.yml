@@ -71,31 +71,37 @@ jobs:
         run: |
           cd lingframe-agent-e2e
           docker compose up -d
-          echo "Waiting for SeaTunnel cluster to become ready on port 5801..."
-          READY=false
+          echo "Waiting for SeaTunnel clusters (agent: 5801, native: 5802) to become ready..."
+          READY_AGENT=false
+          READY_NATIVE=false
           for i in $(seq 1 36); do
-            if [ "$(docker inspect -f '{{.State.Running}}' seatunnel-server 2>/dev/null)" != "true" ]; then
-              echo "seatunnel-server container is NOT running (crashed)! Aborting wait."
+            if [ "$READY_AGENT" != "true" ] && curl -s -f http://localhost:5801/hazelcast/health/ready >/dev/null; then
+              echo "seatunnel-server (agent, port 5801) is READY (attempt $i)!"
+              READY_AGENT=true
+            fi
+            if [ "$READY_NATIVE" != "true" ] && curl -s -f http://localhost:5802/hazelcast/health/ready >/dev/null; then
+              echo "seatunnel-native (control, port 5802) is READY (attempt $i)!"
+              READY_NATIVE=true
+            fi
+            if [ "$READY_AGENT" = "true" ] && [ "$READY_NATIVE" = "true" ]; then
+              echo "All SeaTunnel clusters (agent & native) are READY!"
               break
             fi
-            if curl -s -f http://localhost:5801/hazelcast/health/ready >/dev/null; then
-              echo "SeaTunnel cluster is READY (attempt $i)!"
-              READY=true
-              break
-            fi
-            echo "Waiting for cluster... ($i/36)"
+            echo "Waiting for clusters... ($i/36)"
             sleep 5
           done
           echo "=== Docker Compose PS ==="
           docker compose ps -a
-          if [ "$READY" != "true" ]; then
-            echo "=== SeaTunnel Server Crash Logs ==="
+          if [ "$READY_AGENT" != "true" ] || [ "$READY_NATIVE" != "true" ]; then
+            echo "=== SeaTunnel Logs upon Crash ==="
             docker compose logs seatunnel-server
+            docker compose logs seatunnel-native
             exit 1
           fi
           mvn -B verify || {
             echo "=== SeaTunnel Server Logs upon Failure ==="
             docker compose logs seatunnel-server
+            docker compose logs seatunnel-native
             docker compose down -v
             exit 1
           }
