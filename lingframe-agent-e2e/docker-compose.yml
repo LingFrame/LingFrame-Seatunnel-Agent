@@ -1,9 +1,62 @@
 version: '3.8'
 
 services:
+  mysql-server:
+    image: mysql:8.0
+    container_name: mysql-server
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: test
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --performance_schema=OFF
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - ./src/test/resources/mysql-init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  kafka-server:
+    image: apache/kafka:3.7.0
+    container_name: kafka-server
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-server:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-server:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_HEAP_OPTS: "-Xmx256m -Xms256m"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   seatunnel-server:
     image: apache/seatunnel:2.3.13
     container_name: seatunnel-server
+    depends_on:
+      mysql-server:
+        condition: service_healthy
+      kafka-server:
+        condition: service_healthy
     ports:
       - "5801:5801"
     environment:
@@ -12,6 +65,8 @@ services:
       - ./src/test/resources/seatunnel.yaml:/opt/seatunnel/config/seatunnel.yaml
       - ./src/test/resources/lingframe-governance.yaml:/opt/seatunnel/config/lingframe-governance.yaml
       - ../lingframe-agent-dist/target/lingframe-seatunnel-agent.jar:/opt/seatunnel/lib/lingframe-seatunnel-agent.jar
+      - ./target/connectors/seatunnel:/opt/seatunnel/connectors/seatunnel
+      - ./target/drivers/mysql-connector-java.jar:/opt/seatunnel/lib/mysql-connector-java.jar
     command: >
       sh -c "
         export JAVA_OPTS='$$JAVA_OPTS -javaagent:/opt/seatunnel/lib/lingframe-seatunnel-agent.jar --add-opens java.base/java.net=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.util=ALL-UNNAMED --add-opens java.sql/java.sql=ALL-UNNAMED';

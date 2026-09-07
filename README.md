@@ -1,6 +1,6 @@
 # LingFrame SeaTunnel Agent
 
-> Java Agent 外挂，为零源码修改为 Apache SeaTunnel 提供 LingFrame 治理能力。
+> Java Agent 外挂，为 Apache SeaTunnel 提供 LingFrame 类隔离和治理能力。
 
 ## 快速接入
 

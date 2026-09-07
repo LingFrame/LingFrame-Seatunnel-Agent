@@ -64,14 +64,14 @@ jobs:
           cache: 'maven'
 
 
-      - name: Build Agent Fat-Jar
-        run: mvn -B clean install -DskipTests -pl lingframe-agent-bridge,lingframe-agent-core,lingframe-agent-dist -am
+      - name: Build Agent and E2E Artifacts
+        run: mvn -B clean install -DskipTests
 
       - name: Run E2E Tests
         run: |
           cd lingframe-agent-e2e
           docker compose up -d
-          sleep 30
+          sleep 35
           mvn -B verify
           docker compose down -v
 
@@ -91,8 +91,11 @@ jobs:
       - name: Extract Version from POM
         id: get_version
         run: |
-          VERSION=$(python3 -c "import xml.etree.ElementTree as ET; tree = ET.parse('pom.xml'); root = tree.getroot(); ns = {'m': 'http://maven.apache.org/POM/4.0.0'}; v = root.find('m:version', ns); print((v.text if v is not None else root.find('version').text).strip())")
-          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+          AGENT_VERSION=$(python3 -c "import xml.etree.ElementTree as ET; tree = ET.parse('pom.xml'); root = tree.getroot(); ns = {'m': 'http://maven.apache.org/POM/4.0.0'}; v = root.find('m:version', ns); print((v.text if v is not None else root.find('version').text).strip())")
+          SEATUNNEL_VERSION=$(python3 -c "import xml.etree.ElementTree as ET; tree = ET.parse('pom.xml'); root = tree.getroot(); ns = {'m': 'http://maven.apache.org/POM/4.0.0'}; props = root.find('m:properties', ns); st_v = props.find('m:seatunnel.version', ns) if props is not None else None; print((st_v.text if st_v is not None else '2.3.13').strip())")
+          ASSET_NAME="lingframe-seatunnel-agent-${AGENT_VERSION}-seatunnel-${SEATUNNEL_VERSION}.jar"
+          echo "version=v${AGENT_VERSION}" >> $GITHUB_OUTPUT
+          echo "asset_name=${ASSET_NAME}" >> $GITHUB_OUTPUT
 
       - name: Check if Tag Already Exists
         id: check_tag
@@ -113,6 +116,11 @@ jobs:
           name: lingframe-seatunnel-agent.jar
           path: release-assets/
 
+      - name: Prepare Standard Release Asset
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          cp release-assets/lingframe-seatunnel-agent.jar release-assets/${{ steps.get_version.outputs.asset_name }}
+
       - name: Create Release and Tag
         if: steps.check_tag.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
@@ -120,4 +128,4 @@ jobs:
           tag_name: ${{ steps.get_version.outputs.version }}
           name: Release ${{ steps.get_version.outputs.version }}
           generate_release_notes: true
-          files: release-assets/lingframe-seatunnel-agent.jar
+          files: release-assets/${{ steps.get_version.outputs.asset_name }}
