@@ -22,7 +22,6 @@ import java.net.URLClassLoader;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -88,8 +87,8 @@ class SeaTunnelAdapterTest {
         }
 
         @Test
-        @DisplayName("应与 sorted + '\\n' joining 算法输出一致（保留元素边界）")
-        void shouldMatchSortedJoiningAlgorithm() throws MalformedURLException {
+        @DisplayName("应与 SeaTunnel 官方 sorted + reduce(a + b) 算法输出严格一致")
+        void shouldMatchSeaTunnelOfficialAlgorithm() throws MalformedURLException {
             final SeaTunnelAdapter adapter = createAdapter(true);
             final List<URL> jars = Arrays.asList(
                     new URL("file:/b.jar"),
@@ -100,19 +99,10 @@ class SeaTunnelAdapterTest {
             final String expected = jars.stream()
                     .map(URL::toString)
                     .sorted()
-                    .collect(Collectors.joining("\n"));
+                    .reduce((a, b) -> a + b)
+                    .orElse("");
             assertThat(key).isEqualTo(expected);
-        }
-
-        @Test
-        @DisplayName("换行分隔符应避免元素边界歧义（[a/b,c] != [a,b/c]）")
-        void shouldDistinguishElementBoundary() throws MalformedURLException {
-            final SeaTunnelAdapter adapter = createAdapter(true);
-            final String key1 = adapter.convertJarsToKey(Arrays.asList(
-                    new URL("file:/a/b"), new URL("file:/c")));
-            final String key2 = adapter.convertJarsToKey(Arrays.asList(
-                    new URL("file:/a"), new URL("file:/b/c")));
-            assertThat(key1).isNotEqualTo(key2);
+            assertThat(key).isEqualTo("file:/a.jarfile:/b.jarfile:/c.jar");
         }
 
         @Test

@@ -25,7 +25,6 @@ import java.util.Locale;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAccumulator;
-import java.util.stream.Collectors;
 
 /**
  * SeaTunnel 上下文到 LingFrame 治理微内核的适配器。
@@ -147,9 +146,12 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
 
     @Override
     public String convertJarsToKey(Collection<URL> jars) {
-        // 以换行分隔，保留元素边界，避免 ["a/b","c"] 与 ["a","b/c"] 拼接后歧义碰撞。
-        // URL 字符串不含裸换行（换行会编码为 %0A），'\n' 作为分隔符安全。
-        return jars.stream().map(URL::toString).sorted().collect(Collectors.joining("\n"));
+        // 与 SeaTunnel 官方 DefaultClassLoaderService.buildClassLoaderKey 保持严格一致
+        // 使用 sorted() + reduce((a, b) -> a + b) 拼接，确保在 releaseClassLoader 切面拦截时精确命中 key
+        if (jars == null || jars.isEmpty()) {
+            return "";
+        }
+        return jars.stream().map(URL::toString).sorted().reduce((a, b) -> a + b).orElse("");
     }
 
     /** 兼容便捷入口：无 task 上下文时按共享灵元处理。 */

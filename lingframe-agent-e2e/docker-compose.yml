@@ -61,12 +61,13 @@ services:
       - ./src/test/resources/seatunnel.yaml:/opt/seatunnel/config/seatunnel.yaml
       - ./docker/hazelcast-agent.yaml:/opt/seatunnel/config/hazelcast.yaml
       - ./src/test/resources/lingframe-governance.yaml:/opt/seatunnel/config/lingframe-governance.yaml
+      - ./src/test/resources/log4j2-test.xml:/opt/seatunnel/config/log4j2.xml
       - ../lingframe-agent-dist/target/lingframe-seatunnel-agent.jar:/opt/seatunnel/lib/lingframe-seatunnel-agent.jar
       - ./target/connectors/seatunnel:/opt/seatunnel/connectors/seatunnel
       - ./target/drivers/mysql-connector-java.jar:/opt/seatunnel/lib/mysql-connector-java.jar
     command: >
       sh -c "
-        export JAVA_OPTS=\"$${JAVA_OPTS} -javaagent:/opt/seatunnel/lib/lingframe-seatunnel-agent.jar\";
+        export JAVA_OPTS=\"$${JAVA_OPTS} -Dlog4j2.configurationFile=/opt/seatunnel/config/log4j2.xml -javaagent:/opt/seatunnel/lib/lingframe-seatunnel-agent.jar\";
         /opt/seatunnel/bin/seatunnel-cluster.sh
       "
     healthcheck:
@@ -88,9 +89,14 @@ services:
     volumes:
       - ./src/test/resources/seatunnel.yaml:/opt/seatunnel/config/seatunnel.yaml
       - ./docker/hazelcast-native.yaml:/opt/seatunnel/config/hazelcast.yaml
+      - ./src/test/resources/log4j2-test.xml:/opt/seatunnel/config/log4j2.xml
       - ./target/connectors/seatunnel:/opt/seatunnel/connectors/seatunnel
       - ./target/drivers/mysql-connector-java.jar:/opt/seatunnel/lib/mysql-connector-java.jar
-    command: /opt/seatunnel/bin/seatunnel-cluster.sh
+    command: >
+      sh -c "
+        export JAVA_OPTS=\"$${JAVA_OPTS} -Dlog4j2.configurationFile=/opt/seatunnel/config/log4j2.xml\";
+        /opt/seatunnel/bin/seatunnel-cluster.sh
+      "
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5801/hazelcast/health/ready"]
       interval: 10s

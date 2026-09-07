@@ -53,7 +53,7 @@ class LingFrameAgentBridgeTest {
                     new URL("file:/a.jar")
             );
             final String key = LingFrameAgentBridge.convertJarsToKey(jars);
-            assertThat(key).isEqualTo("file:/a.jar\nfile:/z.jar");
+            assertThat(key).isEqualTo("file:/a.jarfile:/z.jar");
         }
 
         @Test

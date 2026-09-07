@@ -1,8 +1,7 @@
 package com.lingframe.agent.bridge;
 
-import java.util.Collection;
 import java.net.URL;
-import java.util.stream.Collectors;
+import java.util.Collection;
 
 /**
  * 全局可见的静态桥接入口。
@@ -62,8 +61,9 @@ public final class LingFrameAgentBridge {
     public static String convertJarsToKey(Collection<URL> jars) {
         final LingGovernanceContract c = contract;
         return c != null ? c.convertJarsToKey(jars)
-                // 兜底与 adapter 实现保持分隔符一致（'\n'），保留元素边界
-                : jars.stream().map(URL::toString).sorted().collect(Collectors.joining("\n"));
+                // 兜底与官方 DefaultClassLoaderService.buildClassLoaderKey 保持严格一致
+                : (jars == null || jars.isEmpty()) ? ""
+                : jars.stream().map(URL::toString).sorted().reduce((a, b) -> a + b).orElse("");
     }
 
     /**

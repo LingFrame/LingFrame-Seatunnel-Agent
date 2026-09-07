@@ -14,11 +14,25 @@
         <!-- 压制框架流水线 Trace 与内部事件，坚决防止万行日志刷屏 -->
         <Logger name="com.lingframe" level="WARN"/>
 
+        <!-- 放开 LingFrame 卸载协调器、JVM 资源清理钩子与类加载器核心验证日志 -->
+        <Logger name="com.lingframe.core.ling.LingUnloadCoordinator" level="INFO"/>
+        <Logger name="com.lingframe.core.resource" level="INFO"/>
+        <Logger name="com.lingframe.core.classloader" level="INFO"/>
+
         <!-- 仅对 MetaspaceLeakIT 核心测试类放行 INFO 并显式双写，不依赖隐式冒泡，确保纯净输出演进与最终报表 -->
         <Logger name="com.lingframe.agent.e2e.MetaspaceLeakIT" level="INFO" additivity="false">
             <AppenderRef ref="Console"/>
             <AppenderRef ref="AuditFile"/>
         </Logger>
+
+        <!-- 彻底关闭 ConsoleSinkWriter 数据逐行打印，坚决杜绝海量测试数据刷屏 -->
+        <Logger name="org.apache.seatunnel.connectors.seatunnel.console.sink.ConsoleSinkWriter" level="OFF"/>
+
+        <!-- 放开 SeaTunnel 官方 ClassLoader 创建与释放关键生命周期日志 -->
+        <Logger name="org.apache.seatunnel.engine.core.classloader.DefaultClassLoaderService" level="INFO"/>
+
+        <!-- 仅放行 Agent 物理释放与核心生命周期日志 -->
+        <Logger name="com.lingframe.agent" level="INFO"/>
 
         <!-- 压制第三方中间件噪音 -->
         <Logger name="org.apache.seatunnel" level="WARN"/>
