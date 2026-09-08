@@ -7,6 +7,9 @@ import com.lingframe.agent.config.TestAgentConfigs;
 import com.lingframe.agent.pipeline.AgentGovernanceRuntime;
 import com.lingframe.agent.pipeline.AgentPipelineFactory;
 import com.lingframe.api.exception.LingInvocationException;
+import com.lingframe.api.event.LingEventListener;
+import com.lingframe.core.event.EventBus;
+import com.lingframe.core.event.monitor.MonitoringEvents;
 import com.lingframe.core.ling.LingUnloadCoordinator;
 import com.lingframe.core.metrics.LingHealthMetrics;
 import com.lingframe.core.pipeline.InvocationPipelineEngine;
@@ -21,11 +24,14 @@ import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -521,6 +527,115 @@ class SeaTunnelAdapterTest {
             final SeaTunnelAdapter adapter = createAdapter(true);
             adapter.resetHealthMetrics();
         }
+    }
+
+    @Nested
+    @DisplayName("Trace 失败日志窗口限频")
+    class TraceErrorThrottling {
+
+        @Test
+        @DisplayName("熔断风暴下同签名 ERROR 事件在同一窗口内仅放行 1 条，其余抑制")
+        void shouldThrottleRepeatedErrorTrace() {
+            final AgentConfig config = TestAgentConfigs.create(true, true, true, false, false, false);
+            final EventBus eventBus = mock(EventBus.class);
+            final Map<Class<?>, LingEventListener<?>> subs = captureSubscriptions(eventBus);
+            final SeaTunnelAdapter adapter = new SeaTunnelAdapter(config, null, null, null, eventBus, null);
+
+            adapter.beforeTaskCall(); // 触发订阅（traceLogLevel=INFO 时应注册监听器）
+
+            final LingEventListener<MonitoringEvents.TraceLogEvent> listener =
+                    (LingEventListener<MonitoringEvents.TraceLogEvent>) subs.get(MonitoringEvents.TraceLogEvent.class);
+            assertThat(listener).isNotNull();
+
+            final int bursts = 10;
+            // 仅耗时（ms）不同，归一化后为同一签名 → 窗口内应只放行 1 条
+            for (int i = 0; i < bursts; i++) {
+                listener.onEvent(new MonitoringEvents.TraceLogEvent(
+                        "trace-" + i, "seatunnel-job-7",
+                        "taskCall (" + i + "ms) - LingInvocationException", "ERROR", 0));
+            }
+
+            assertThat(adapter.getTraceErrorSuppressedCount()).isEqualTo(bursts - 1);
+        }
+
+        @Test
+        @DisplayName("成功轨迹（IN/OUT）不触发失败限频抑制")
+        void shouldNotThrottleNonErrorTrace() {
+            final AgentConfig config = TestAgentConfigs.create(true, true, true, false, false, false);
+            final EventBus eventBus = mock(EventBus.class);
+            final Map<Class<?>, LingEventListener<?>> subs = captureSubscriptions(eventBus);
+            final SeaTunnelAdapter adapter = new SeaTunnelAdapter(config, null, null, null, eventBus, null);
+
+            adapter.beforeTaskCall();
+
+            final LingEventListener<MonitoringEvents.TraceLogEvent> listener =
+                    (LingEventListener<MonitoringEvents.TraceLogEvent>) subs.get(MonitoringEvents.TraceLogEvent.class);
+            for (int i = 0; i < 5; i++) {
+                listener.onEvent(new MonitoringEvents.TraceLogEvent(
+                        "trace-" + i, "seatunnel-job-7", "taskCall", "IN", 0));
+            }
+
+            assertThat(adapter.getTraceErrorSuppressedCount()).isZero();
+        }
+    }
+
+    @Nested
+    @DisplayName("失败审计日志窗口限频")
+    class AuditFailThrottling {
+
+        @Test
+        @DisplayName("熔断风暴下同签名失败审计在同一窗口内仅放行 1 条，其余抑制")
+        void shouldThrottleRepeatedFailAudit() {
+            final AgentConfig config = TestAgentConfigs.create(true, true, true, false, false, false);
+            final EventBus eventBus = mock(EventBus.class);
+            final Map<Class<?>, LingEventListener<?>> subs = captureSubscriptions(eventBus);
+            final SeaTunnelAdapter adapter = new SeaTunnelAdapter(config, null, null, null, eventBus, null);
+
+            adapter.beforeTaskCall(); // 触发订阅
+
+            final LingEventListener<MonitoringEvents.AuditLogEvent> listener =
+                    (LingEventListener<MonitoringEvents.AuditLogEvent>) subs.get(MonitoringEvents.AuditLogEvent.class);
+            assertThat(listener).isNotNull();
+
+            final int bursts = 10;
+            // 同 lingId/action/resource 的同签名失败审计，窗口内应只放行 1 条
+            for (int i = 0; i < bursts; i++) {
+                listener.onEvent(new MonitoringEvents.AuditLogEvent(
+                        "trace-" + i, "seatunnel-job-7", "beforeTaskCall", "source-1", false, 12L));
+            }
+
+            assertThat(adapter.getAuditFailSuppressedCount()).isEqualTo(bursts - 1);
+        }
+
+        @Test
+        @DisplayName("成功审计不触发失败限频抑制，保持采样率降频")
+        void shouldNotThrottleSuccessAudit() {
+            final AgentConfig config = TestAgentConfigs.create(true, true, true, false, false, false);
+            final EventBus eventBus = mock(EventBus.class);
+            final Map<Class<?>, LingEventListener<?>> subs = captureSubscriptions(eventBus);
+            final SeaTunnelAdapter adapter = new SeaTunnelAdapter(config, null, null, null, eventBus, null);
+
+            adapter.beforeTaskCall();
+
+            final LingEventListener<MonitoringEvents.AuditLogEvent> listener =
+                    (LingEventListener<MonitoringEvents.AuditLogEvent>) subs.get(MonitoringEvents.AuditLogEvent.class);
+            for (int i = 0; i < 5; i++) {
+                listener.onEvent(new MonitoringEvents.AuditLogEvent(
+                        "trace-" + i, "seatunnel-job-7", "beforeTaskCall", "source-1", true, 8L));
+            }
+
+            assertThat(adapter.getAuditFailSuppressedCount()).isZero();
+        }
+    }
+
+    /** 令 mock EventBus 记录已注册的订阅监听器，供测试直接驱动事件。 */
+    private Map<Class<?>, LingEventListener<?>> captureSubscriptions(EventBus eventBus) {
+        final Map<Class<?>, LingEventListener<?>> subs = new HashMap<>();
+        doAnswer(invocation -> {
+            subs.put(invocation.getArgument(0), invocation.getArgument(1));
+            return null;
+        }).when(eventBus).subscribeGlobal(any(), any());
+        return subs;
     }
 
     private SeaTunnelAdapter createAdapter(boolean enabled) {

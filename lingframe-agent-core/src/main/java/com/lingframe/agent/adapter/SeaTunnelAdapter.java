@@ -25,6 +25,7 @@ import java.util.Locale;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAccumulator;
+import java.util.regex.Pattern;
 
 /**
  * SeaTunnel 上下文到 LingFrame 治理微内核的适配器。
@@ -58,6 +59,9 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
 
     /** Hazelcast 配置中心初始化失败后的重试间隔（毫秒）——实例就绪前避免每个批次都探测一次 */
     private static final long CONFIG_CENTER_RETRY_INTERVAL_MS = 5_000L;
+
+    /** Trace 失败 action 中的耗时片段（如 {@code taskCall (5ms)}），归一化后用于失败签名去重 */
+    private static final Pattern TRACE_COST_CLEANER = Pattern.compile("\\(\\d+\\s*ms\\)");
 
     private final AgentConfig config;
     private final InvocationPipelineEngine pipelineEngine;
@@ -96,6 +100,10 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
     /** Trace/Audit 事件日志采样计数器（按 log-sample-rate 抽样，降低高 QPS 日志压力） */
     private final AtomicLong traceLogCounter = new AtomicLong();
     private final AtomicLong auditLogCounter = new AtomicLong();
+    /** Trace 失败事件窗口限频器：熔断风暴等高重复失败仍逐条落 INFO 会引爆日志，仅失败轨迹接入 */
+    private final TraceLogThrottle traceErrorThrottle = new TraceLogThrottle();
+    /** 失败审计事件窗口限频器：失败审计与 Trace 失败同根（熔断拒绝等），按签名收敛抑制同类重复，成功审计仍走采样率 */
+    private final TraceLogThrottle auditFailThrottle = new TraceLogThrottle();
 
     public SeaTunnelAdapter(AgentConfig config,
                            InvocationPipelineEngine pipelineEngine,
@@ -456,21 +464,41 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
         try {
             eventBus.subscribeGlobal(MonitoringEvents.TraceLogEvent.class,
                     (LingEventListener<MonitoringEvents.TraceLogEvent>) event -> {
-                        if (config.isTraceLogEnabled()
-                                && traceLogCounter.getAndIncrement() % config.getLogSampleRate() == 0) {
-                            log.info("[Trace] traceId={}, lingId={}, action={}, type={}, depth={}",
-                                    event.getTraceId(), event.getLingId(), event.getAction(),
-                                    event.getType(), event.getDepth());
+                        if (!config.isTraceLogEnabled()) {
+                            return;
                         }
+                        // 失败类 Trace 走「按签名 + 时间窗口」限频：熔断 OPEN 等故障形态下同一资源
+                        // 会在极短时间同毫秒内高频重复产生同类 ERROR 事件，逐条落 INFO 会引爆日志量
+                        //（数十 MB / 十数万行）。归一化 action 里的耗时片段后按 (lingId,type,action)
+                        // 在窗口内限频，其余抑制并累计计数；成功轨迹（IN/OUT）仍按全局采样。
+                        if (isTraceError(event)) {
+                            if (!traceErrorThrottle.tryAcquire(traceErrorKey(event), System.currentTimeMillis())) {
+                                return;
+                            }
+                        } else if (traceLogCounter.getAndIncrement() % config.getLogSampleRate() != 0) {
+                            return;
+                        }
+                        log.info("[Trace] traceId={}, lingId={}, action={}, type={}, depth={}",
+                                event.getTraceId(), event.getLingId(), event.getAction(),
+                                event.getType(), event.getDepth());
                     });
             eventBus.subscribeGlobal(MonitoringEvents.AuditLogEvent.class,
                     (LingEventListener<MonitoringEvents.AuditLogEvent>) event -> {
-                        if (config.isAuditLogEnabled()
-                                && auditLogCounter.getAndIncrement() % config.getLogSampleRate() == 0) {
-                            log.info("[Audit] traceId={}, lingId={}, action={}, resource={}, success={}",
-                                    event.getTraceId(), event.getLingId(), event.getAction(),
-                                    event.getResource(), event.isSuccess());
+                        if (!config.isAuditLogEnabled()) {
+                            return;
                         }
+                        // 失败审计（熔断拒绝等）与 Trace 失败同根，按签名+时间窗口限频抑制同类重复；
+                        // 成功审计保持全局采样率降频。
+                        if (!event.isSuccess()) {
+                            if (!auditFailThrottle.tryAcquire(auditFailKey(event), System.currentTimeMillis())) {
+                                return;
+                            }
+                        } else if (auditLogCounter.getAndIncrement() % config.getLogSampleRate() != 0) {
+                            return;
+                        }
+                        log.info("[Audit] traceId={}, lingId={}, action={}, resource={}, success={}",
+                                event.getTraceId(), event.getLingId(), event.getAction(),
+                                event.getResource(), event.isSuccess());
                     });
             eventBus.subscribeGlobal(MonitoringEvents.CircuitBreakerStateEvent.class,
                     (LingEventListener<MonitoringEvents.CircuitBreakerStateEvent>) event ->
@@ -481,6 +509,31 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
         } catch (Exception e) {
             log.warn("Failed to subscribe pipeline events: {}", e.getMessage());
         }
+    }
+
+    /** 是否为失败类 Trace 事件（熔断拒绝等 ERROR 轨迹，需要限频抑制重复打印）。 */
+    private boolean isTraceError(MonitoringEvents.TraceLogEvent event) {
+        return "ERROR".equalsIgnoreCase(event.getType());
+    }
+
+    /**
+     * 归一化失败 Trace 的限频签名。
+     * 归一化 action 中的耗时片段（如 {@code taskCall (5ms)} -> {@code taskCall}），
+     * 使同签名不同耗时的重复失败命中同一窗口限频，而非各自计成新签名。
+     */
+    private String traceErrorKey(MonitoringEvents.TraceLogEvent event) {
+        final String action = event.getAction() == null
+                ? "" : TRACE_COST_CLEANER.matcher(event.getAction()).replaceAll("");
+        return event.getLingId() + "|" + event.getType() + "|" + action;
+    }
+
+    /**
+     * 归一化失败审计的限频签名。
+     * 熔断拒绝等失败审计中异常信息（failureReason）多态易变，仅取稳定维度（lingId, action, resource）
+     * 收敛同类失败，使同一资源被熔断拒绝时命中同一窗口限频，而非每条计成新签名。
+     */
+    private String auditFailKey(MonitoringEvents.AuditLogEvent event) {
+        return event.getLingId() + "|" + event.getAction() + "|" + event.getResource();
     }
 
     /**
@@ -531,6 +584,16 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
 
     public long getHookCallCount() {
         return hookCallCount.get();
+    }
+
+    /** 被 Trace 失败限频器抑制（未打印）的失败事件累计计数，供可观测与测试断言。 */
+    public long getTraceErrorSuppressedCount() {
+        return traceErrorThrottle.suppressedCount();
+    }
+
+    /** 返回已被窗口限频抑制的失败审计条数（供运维/测试观测）。 */
+    public long getAuditFailSuppressedCount() {
+        return auditFailThrottle.suppressedCount();
     }
 
     public long getHookLatencyAvgNanos() {

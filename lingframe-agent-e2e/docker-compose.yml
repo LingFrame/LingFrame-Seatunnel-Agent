@@ -62,6 +62,7 @@ services:
       - ./docker/hazelcast-agent.yaml:/opt/seatunnel/config/hazelcast.yaml
       - ./src/test/resources/lingframe-governance.yaml:/opt/seatunnel/config/lingframe-governance.yaml
       - ./src/test/resources/log4j2-test.xml:/opt/seatunnel/config/log4j2.xml
+      - ./src/test/resources/log4j2.properties:/opt/seatunnel/config/log4j2.properties
       - ../lingframe-agent-dist/target/lingframe-seatunnel-agent.jar:/opt/seatunnel/lib/lingframe-seatunnel-agent.jar
       - ./target/connectors/seatunnel:/opt/seatunnel/connectors/seatunnel
       - ./target/drivers/mysql-connector-java.jar:/opt/seatunnel/lib/mysql-connector-java.jar
@@ -90,6 +91,7 @@ services:
       - ./src/test/resources/seatunnel.yaml:/opt/seatunnel/config/seatunnel.yaml
       - ./docker/hazelcast-native.yaml:/opt/seatunnel/config/hazelcast.yaml
       - ./src/test/resources/log4j2-test.xml:/opt/seatunnel/config/log4j2.xml
+      - ./src/test/resources/log4j2.properties:/opt/seatunnel/config/log4j2.properties
       - ./target/connectors/seatunnel:/opt/seatunnel/connectors/seatunnel
       - ./target/drivers/mysql-connector-java.jar:/opt/seatunnel/lib/mysql-connector-java.jar
     command: >

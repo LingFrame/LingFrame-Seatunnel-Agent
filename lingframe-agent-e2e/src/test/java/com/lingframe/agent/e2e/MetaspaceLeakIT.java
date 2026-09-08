@@ -14,9 +14,13 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.AbstractMap.SimpleEntry;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -163,6 +167,7 @@ class MetaspaceLeakIT {
                 .isGreaterThan(10 * 1024 * 1024L);
         log.info("[{}] Metaspace audit started: baseline={} bytes ({})",
                 targetLabel, baseline, formatMb(baseline));
+        final Map<String, Long> baselineHistogram = captureClassHistogramAggregated(containerName);
 
         // 2. 阶段一：执行 3×3 全正交 9 组作业矩阵（每组执行 2 轮）
         long round1Used = 0L;
@@ -223,6 +228,13 @@ class MetaspaceLeakIT {
 
         log.info("[{}] Metaspace progression [Concurrent Final]: used={} bytes ({}), deltaFromBaseline={} bytes ({})",
                 targetLabel, finalUsed, formatMb(finalUsed), growth, formatMb(growth));
+
+        final Map<String, Long> finalHistogram = captureClassHistogramAggregated(containerName);
+        if (!baselineHistogram.isEmpty() && !finalHistogram.isEmpty()) {
+            printClassHistogramDiff(targetLabel, baselineHistogram, finalHistogram);
+        } else {
+            log.info("[{}] Class histogram diff skipped (capture unavailable at baseline or final)", targetLabel);
+        }
 
         return new MetaspaceAuditResult(baseline, round1Used, round2Used, finalUsed);
     }
@@ -353,6 +365,84 @@ class MetaspaceLeakIT {
 
     private static final Pattern HEAP_INFO_METASPACE_PATTERN =
             Pattern.compile("Metaspace\\s+used\\s+(\\d+)\\s*K", Pattern.CASE_INSENSITIVE);
+
+    /** jcmd GC.class_histogram 行：` 123:     456      7890  com.example.Foo` */
+    private static final Pattern CLASS_HISTOGRAM_LINE =
+            Pattern.compile("^\\s*\\d+:\\s+\\d+\\s+(\\d+)\\s+(.+)\\s*$");
+
+    private static final int CLASS_HISTOGRAM_TOP_N = 25;
+    private static final String CLASS_HISTOGRAM_INCLUDE =
+            "org\\.apache\\.seatunnel|com\\.mysql|org\\.apache\\.kafka|SeaTunnelChildFirstClassLoader";
+
+    /**
+     * 执行 jcmd GC.class_histogram 并将同名类的 #bytes 聚合成 Map。
+     * <p>
+     * 仅聚合可反序列化为看得懂的类；失败时降级为空 Map（不影响主审计流程）。
+     */
+    private Map<String, Long> captureClassHistogramAggregated(String containerName) {
+        final Map<String, Long> byClass = new LinkedHashMap<>();
+        try {
+            final String pid = resolveJavaPid(containerName);
+            final ProcessBuilder pb = new ProcessBuilder(
+                    "docker", "exec", containerName, "jcmd", pid, "GC.class_histogram");
+            pb.redirectErrorStream(true);
+            final Process p = pb.start();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    final Matcher m = CLASS_HISTOGRAM_LINE.matcher(line);
+                    if (m.matches()) {
+                        byClass.merge(m.group(2).trim(), Long.parseLong(m.group(1)), Long::sum);
+                    }
+                }
+            }
+            p.waitFor(15, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("class histogram capture failed in container {}: {}", containerName, e.getMessage());
+            return Collections.emptyMap();
+        }
+        return byClass;
+    }
+
+    /**
+     * 打印 Metaspace 类直方图增量（baseline -> final）Top N，
+     * 用于定位泄漏的是哪些类/所属方向（connector vs 引擎 vs 平台）。
+     */
+    private void printClassHistogramDiff(String targetLabel,
+                                         Map<String, Long> baseline, Map<String, Long> finalSample) {
+        final List<SimpleEntry<String, Long>> growth = new ArrayList<>();
+        for (Map.Entry<String, Long> e : finalSample.entrySet()) {
+            final long delta = e.getValue() - baseline.getOrDefault(e.getKey(), 0L);
+            if (delta > 0) {
+                growth.add(new SimpleEntry<>(e.getKey(), delta));
+            }
+        }
+        growth.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
+
+        final long totalGrowth = growth.stream().mapToLong(SimpleEntry::getValue).sum();
+        log.info("[{}] ========== Metaspace Class Histogram Growth (Top {}) ==========",
+                targetLabel, CLASS_HISTOGRAM_TOP_N);
+        log.info("[{}] Total class-bytes growth: {} ({})",
+                targetLabel, totalGrowth, formatMb(totalGrowth));
+        int shown = 0;
+        for (SimpleEntry<String, Long> e : growth) {
+            if (shown >= CLASS_HISTOGRAM_TOP_N) {
+                break;
+            }
+            final String cls = e.getKey();
+            if (!cls.matches(".*" + CLASS_HISTOGRAM_INCLUDE + ".*")) {
+                continue;
+            }
+            log.info("[{}]   +{} bytes ({})  {}", targetLabel, e.getValue(), formatMb(e.getValue()), cls);
+            shown++;
+        }
+        if (shown == 0) {
+            log.info("[{}]   (no growth within monitored connector/engine class names)",
+                    targetLabel);
+        }
+        log.info("[{}] ===========================================================", targetLabel);
+    }
 
     private void forceFullGcInContainer(String containerName) {
         try {
