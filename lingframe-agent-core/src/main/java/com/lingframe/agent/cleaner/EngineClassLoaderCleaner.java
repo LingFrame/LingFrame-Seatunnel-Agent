@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.beans.Introspector;
+import java.lang.ref.Reference;
 import java.lang.reflect.AccessibleObject;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -405,6 +406,7 @@ public final class EngineClassLoaderCleaner {
                     log.info("Force evicted and physically releasing ClassLoader [{}] for job {}",
                             cl.getClass().getName(), jobId);
                     LingFrameAgentBridge.onPhysicalRelease(cl);
+                    cleanObjectStreamClassCaches(cl);
                     evicted++;
                 }
             }
@@ -416,11 +418,113 @@ public final class EngineClassLoaderCleaner {
     }
 
     /**
+     * 清理 java.io.ObjectStreamClass$Caches 中属于指定 ClassLoader 的条目。
+     * <p>
+     * Java 序列化机制会在 ObjectStreamClass$Caches.localDescs 和 reflectors 中
+     * 缓存 SoftReference&lt;ObjectStreamClass&gt;，每个 ObjectStreamClass 持有其描述的
+     * Class&lt;?&gt; 引用，Class&lt;?&gt; 又持有 classLoader 引用。
+     * SoftReference 在内存充足时不会被 GC，导致已关闭的 ClassLoader 无法被回收，
+     * Metaspace 泄漏。此方法精准移除属于目标 ClassLoader 的缓存条目。
+     *
+     * @param targetCl 已被驱逐的 ClassLoader
+     */
+    private static void cleanObjectStreamClassCaches(ClassLoader targetCl) {
+        if (targetCl == null) {
+            return;
+        }
+        try {
+            final Class<?> cachesClass = Class.forName("java.io.ObjectStreamClass$Caches");
+            int totalRemoved = 0;
+            for (String fieldName : new String[]{"localDescs", "reflectors"}) {
+                try {
+                    final Field field = cachesClass.getDeclaredField(fieldName);
+                    field.setAccessible(true);
+                    final Object map = field.get(null);
+                    if (map instanceof Map) {
+                        totalRemoved += cleanObjectStreamClassCacheMap((Map<?, ?>) map, targetCl);
+                    }
+                } catch (NoSuchFieldException e) {
+                    // 不同 JDK 版本字段名可能不同，跳过
+                }
+            }
+            if (totalRemoved > 0) {
+                log.info("Cleaned {} ObjectStreamClass cache entries for ClassLoader [{}]",
+                        totalRemoved, targetCl.getClass().getName());
+            }
+        } catch (Throwable t) {
+            log.debug("Failed to clean ObjectStreamClass caches: {}", t.getMessage());
+        }
+    }
+
+    /**
+     * 从 ObjectStreamClass 缓存 Map 中移除属于目标 ClassLoader 的条目。
+     *
+     * @param cacheMap ObjectStreamClass$Caches.localDescs 或 reflectors
+     * @param targetCl 目标 ClassLoader
+     * @return 移除的条目数
+     */
+    private static int cleanObjectStreamClassCacheMap(Map<?, ?> cacheMap, ClassLoader targetCl) {
+        int removed = 0;
+        for (Map.Entry<?, ?> entry : cacheMap.entrySet()) {
+            final Object key = entry.getKey();
+            final Object value = entry.getValue();
+
+            // 检查 key (WeakReference<Class<?>>) 的 referent
+            Class<?> keyClass = getReferenceReferentAsClass(key);
+            if (keyClass != null && keyClass.getClassLoader() == targetCl) {
+                cacheMap.remove(key);
+                removed++;
+                continue;
+            }
+
+            // 检查 value (SoftReference<ObjectStreamClass>) 的 referent.cl
+            Class<?> valueClass = getObjectStreamClassReferentClass(value);
+            if (valueClass != null && valueClass.getClassLoader() == targetCl) {
+                cacheMap.remove(key);
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    /**
+     * 从 Reference 对象中提取 referent，如果 referent 是 Class 则返回。
+     */
+    private static Class<?> getReferenceReferentAsClass(Object ref) {
+        if (ref == null || !(ref instanceof Reference)) {
+            return null;
+        }
+        final Object referent = ((Reference<?>) ref).get();
+        return referent instanceof Class ? (Class<?>) referent : null;
+    }
+
+    /**
+     * 从 Reference&lt;ObjectStreamClass&gt; 中提取 ObjectStreamClass 的 cl 字段（Class&lt;?&gt;）。
+     */
+    private static Class<?> getObjectStreamClassReferentClass(Object ref) {
+        if (ref == null || !(ref instanceof Reference)) {
+            return null;
+        }
+        final Object referent = ((Reference<?>) ref).get();
+        if (referent == null) {
+            return null;
+        }
+        try {
+            final Field clField = referent.getClass().getDeclaredField("cl");
+            clField.setAccessible(true);
+            final Object cl = clField.get(referent);
+            return cl instanceof Class ? (Class<?>) cl : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
      * 安全显式关闭作业级自定义类加载器（释放底层的 JAR 句柄与 ClassPath 资源）。
      * <p>
      * 安全守卫机制（绝不走两极）：
      * <ol>
-     *   <li>必须是 {@link URLClassLoader} 实例；</li>
+     *   <li>必须是 {@link* URLClassLoader} 实例；</li>
      *   <li>绝对不能是系统类加载器（SystemClassLoader/Platform/Ext）链上的加载器；</li>
      *   <li>绝对不能是 Agent/宿主核心类加载器链上的加载器；</li>
      *   <li>严格保护测试宿主（如 Surefire Forked VM / IDE 运行器）与引擎平台常驻基础组件，杜绝误杀；</li>
