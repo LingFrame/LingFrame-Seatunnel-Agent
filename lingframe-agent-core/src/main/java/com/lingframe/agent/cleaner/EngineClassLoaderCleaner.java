@@ -226,6 +226,11 @@ public final class EngineClassLoaderCleaner {
             for (Long jobId : completedJobIds) {
                 forceEvictJobClassLoaders(jobId);
             }
+
+            // 全局清理 ObjectStreamClass$Caches 中所有非系统 ClassLoader 的缓存条目。
+            // forceEvictJobClassLoaders 中的按 ClassLoader 清理可能因 toRelease 为空而遗漏，
+            // 全局扫描确保彻底清除残留的 SoftReference → ObjectStreamClass → Class → ClassLoader 引用链。
+            cleanAllObjectStreamClassCaches();
         } catch (Throwable t) {
             log.warn("EngineClassLoaderCleaner finished-context clean skipped (engine version mismatch?): {}",
                     t.getMessage());
@@ -418,6 +423,7 @@ public final class EngineClassLoaderCleaner {
                             cl.getClass().getName(), jobId);
                     LingFrameAgentBridge.onPhysicalRelease(cl);
                     cleanObjectStreamClassCaches(cl);
+                    interruptThreadsByClassLoader(cl);
                     evicted++;
                 }
             }
@@ -464,6 +470,137 @@ public final class EngineClassLoaderCleaner {
             }
         } catch (Throwable t) {
             log.debug("Failed to clean ObjectStreamClass caches: {}", t.getMessage());
+        }
+    }
+
+    /**
+     * 全局清理 ObjectStreamClass$Caches 中所有非系统 ClassLoader 的缓存条目。
+     * <p>
+     * {@code forceEvictJobClassLoaders} 中的按 ClassLoader 清理可能因 toRelease 为空而遗漏，
+     * 全局扫描确保彻底清除残留的 SoftReference → ObjectStreamClass → Class → ClassLoader 引用链。
+     */
+    private static void cleanAllObjectStreamClassCaches() {
+        try {
+            final Class<?> cachesClass = Class.forName("java.io.ObjectStreamClass$Caches");
+            int totalRemoved = 0;
+            for (String fieldName : new String[]{"localDescs", "reflectors"}) {
+                try {
+                    final Field field = cachesClass.getDeclaredField(fieldName);
+                    field.setAccessible(true);
+                    final Object map = field.get(null);
+                    if (map instanceof Map) {
+                        totalRemoved += cleanAllNonSystemCacheEntries((Map<?, ?>) map);
+                    }
+                } catch (NoSuchFieldException e) {
+                    log.debug("ObjectStreamClass$Caches field {} not found on this JDK, skipping", fieldName);
+                }
+            }
+            if (totalRemoved > 0) {
+                log.info("Cleaned {} ObjectStreamClass cache entries (global sweep)", totalRemoved);
+            }
+        } catch (Throwable t) {
+            log.debug("Failed to clean ObjectStreamClass caches (global): {}", t.getMessage());
+        }
+    }
+
+    /**
+     * 从 ObjectStreamClass 缓存 Map 中移除所有非系统 ClassLoader 的条目。
+     */
+    private static int cleanAllNonSystemCacheEntries(Map<?, ?> cacheMap) {
+        int removed = 0;
+        final Iterator<? extends Map.Entry<?, ?>> it = cacheMap.entrySet().iterator();
+        while (it.hasNext()) {
+            final Map.Entry<?, ?> entry = it.next();
+            final Object key = entry.getKey();
+            final Object value = entry.getValue();
+
+            final Class<?> keyClass = getReferenceReferentAsClass(key);
+            if (keyClass != null && !isSystemOrHostClassLoader(keyClass.getClassLoader())) {
+                it.remove();
+                removed++;
+                continue;
+            }
+
+            final Class<?> valueClass = getObjectStreamClassReferentClass(value);
+            if (valueClass != null && !isSystemOrHostClassLoader(valueClass.getClassLoader())) {
+                it.remove();
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    /**
+     * 中断由目标 ClassLoader 加载的线程（如 Kafka admin client 后台线程）。
+     * <p>
+     * 线程通过 Thread → Class → ClassLoader 持有引用，只要线程存活 ClassLoader 无法回收。
+     * interrupt 是最安全的终止信号，Kafka 线程通常响应中断并退出。
+     */
+    private static void interruptThreadsByClassLoader(ClassLoader targetCl) {
+        if (targetCl == null) {
+            return;
+        }
+        try {
+            final Set<Thread> threads = getAllThreads();
+            int interrupted = 0;
+            for (Thread t : threads) {
+                if (t == null || t == Thread.currentThread() || !t.isAlive()) {
+                    continue;
+                }
+                Class<?> threadClass = t.getClass();
+                while (threadClass != null) {
+                    if (threadClass.getClassLoader() == targetCl) {
+                        t.interrupt();
+                        interrupted++;
+                        log.info("Interrupted thread {} (class {} loaded by evicted ClassLoader)",
+                                t.getName(), threadClass.getName());
+                        break;
+                    }
+                    threadClass = threadClass.getSuperclass();
+                }
+            }
+            if (interrupted > 0) {
+                log.info("Interrupted {} threads loaded by evicted ClassLoader", interrupted);
+            }
+        } catch (Throwable t) {
+            log.debug("Failed to interrupt threads by ClassLoader: {}", t.getMessage());
+        }
+    }
+
+    /**
+     * 收集 JVM 中所有活线程（跨线程组）。
+     */
+    private static Set<Thread> getAllThreads() {
+        final Set<Thread> threads = new HashSet<>();
+        final ThreadGroup root = Thread.currentThread().getThreadGroup();
+        ThreadGroup parent = root;
+        while (parent.getParent() != null) {
+            parent = parent.getParent();
+        }
+        collectThreads(parent, threads);
+        return threads;
+    }
+
+    /**
+     * 递归收集线程组中的所有线程。
+     */
+    private static void collectThreads(ThreadGroup group, Set<Thread> threads) {
+        if (group == null) {
+            return;
+        }
+        final int estimate = group.activeCount() * 2;
+        final Thread[] batch = new Thread[estimate];
+        final int count = group.enumerate(batch, false);
+        for (int i = 0; i < count; i++) {
+            if (batch[i] != null) {
+                threads.add(batch[i]);
+            }
+        }
+        final int groupEstimate = group.activeGroupCount() * 2;
+        final ThreadGroup[] subGroups = new ThreadGroup[groupEstimate];
+        final int groupCount = group.enumerate(subGroups, false);
+        for (int i = 0; i < groupCount; i++) {
+            collectThreads(subGroups[i], threads);
         }
     }
 
