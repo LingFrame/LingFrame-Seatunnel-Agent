@@ -7,7 +7,9 @@ import com.lingframe.agent.bridge.LingFrameAgentBridge;
 import com.lingframe.agent.config.AgentConfig;
 import com.lingframe.agent.advice.ClassLoaderReleaseAdvice;
 import com.lingframe.agent.advice.TaskExecutionAdvice;
+import com.lingframe.agent.advice.TaskExecutionServiceCacheAdvice;
 import com.lingframe.agent.advice.TcclGuardAdvice;
+import com.lingframe.agent.cleaner.EngineClassLoaderCleaner;
 import com.lingframe.agent.pipeline.AgentGovernanceRuntime;
 import com.lingframe.agent.pipeline.AgentPipelineFactory;
 import com.lingframe.agent.observability.LingFrameAgentObservability;
@@ -24,6 +26,9 @@ import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import javax.management.ObjectName;
 
 /**
@@ -53,6 +58,9 @@ public final class LingFrameAgentActivationRunner {
             "org.apache.seatunnel.engine.core.classloader.DefaultClassLoaderService";
     private static final String ABSTRACT_TASK_TYPE =
             "org.apache.seatunnel.engine.server.task.AbstractTask";
+    /** 引擎执行服务类型——捕获其实例，清理已完成作业上下文中强持有的 ClassLoader 引用 */
+    private static final String TASK_EXECUTION_SERVICE_TYPE =
+            "org.apache.seatunnel.engine.server.TaskExecutionService";
 
     /**
      * 治理微内核实际装配入口。被 {@link LingFrameAgentPremain#premain} 反射调用，
@@ -65,6 +73,12 @@ public final class LingFrameAgentActivationRunner {
         log.info("LingFrame SeaTunnel Agent starting...");
 
         final AgentConfig config = AgentConfig.load(agentArgs);
+
+        // 引擎 ClassLoader 清理必须在治理门控之前安装：MetaspaceLeakIT 以治理关闭
+        // (PASS_THROUGH) 对比 native/agent，本清理让 agent 容器仍能释放引擎已完成作业的
+        // ClassLoader 引用，从而与 native 形成对照、锁定 Metaspace 泄漏。
+        installEngineClassLoaderCleanup(inst);
+
         if (!config.isGovernanceEnabled()) {
             log.info("Governance is disabled by config, Agent runs in PASS_THROUGH mode");
             return;
@@ -237,6 +251,49 @@ public final class LingFrameAgentActivationRunner {
         } catch (ClassNotFoundException e) {
             log.warn("DefaultClassLoaderService not found on classpath, skipping ClassLoader advice: {}", e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * 引擎 ClassLoader 清理织入（独立于治理门控，Metaspace 泄漏治理在任何模式均生效）。
+     * <p>
+     * 织入 {@code TaskExecutionService#getExecutionContext} 捕获引擎实例，并由后台守护线程
+     * 周期调用 {@link EngineClassLoaderCleaner#cleanFinished()}，释放已完成作业上下文中强持有的
+     * ClassLoader/jars/taskGroup 引用。全程反射、失败降级，绝不破坏引擎运行。
+     */
+    private static void installEngineClassLoaderCleanup(Instrumentation inst) {
+        try {
+            final AgentBuilder builder = new AgentBuilder.Default()
+                    .with(AgentBuilder.RedefinitionStrategy.RETRANSFORMATION)
+                    .with(AgentBuilder.TypeStrategy.Default.REDEFINE)
+                    .with(new AgentBuilder.Listener.Adapter() {
+                        @Override
+                        public void onError(String typeName, ClassLoader classLoader, JavaModule module,
+                                            boolean loaded, Throwable throwable) {
+                            log.error("ByteBuddy weaving FAILED for type [{}] (engine ClassLoader cleanup "
+                                    + "INACTIVE): {}", typeName, throwable.getMessage(), throwable);
+                        }
+                    })
+                    .ignore(ElementMatchers.nameStartsWith("net.bytebuddy.")
+                            .or(ElementMatchers.nameStartsWith("com.lingframe.agent."))
+                            .or(ElementMatchers.isSynthetic()))
+                    .type(ElementMatchers.named(TASK_EXECUTION_SERVICE_TYPE))
+                    .transform(new AgentBuilder.Transformer.ForAdvice()
+                            .include(TaskExecutionServiceCacheAdvice.class.getClassLoader())
+                            .advice(ElementMatchers.named("getExecutionContext"),
+                                    TaskExecutionServiceCacheAdvice.class.getName()));
+            builder.installOn(inst);
+            final ScheduledExecutorService scheduler =
+                    Executors.newSingleThreadScheduledExecutor(r -> {
+                        final Thread t = new Thread(r, "ling-engine-classloader-cleaner");
+                        t.setDaemon(true);
+                        return t;
+                    });
+            scheduler.scheduleWithFixedDelay(EngineClassLoaderCleaner::cleanFinished, 5, 1, TimeUnit.SECONDS);
+            log.info("EngineClassLoaderCleanup ENABLED — capturing TaskExecutionService, releasing finished "
+                    + "job ClassLoader refs (interval=1s)");
+        } catch (Throwable t) {
+            log.warn("EngineClassLoaderCleanup setup FAILED (Metaspace governance degraded): {}", t.getMessage());
         }
     }
 
