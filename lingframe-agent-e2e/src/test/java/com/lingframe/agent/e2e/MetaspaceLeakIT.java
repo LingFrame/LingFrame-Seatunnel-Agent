@@ -63,14 +63,19 @@ class MetaspaceLeakIT {
         private final long round2;
         private final long finalUsed;
         private final long netGrowth;
+        private final long loadedDelta;
+        private final long unloadedDelta;
         private final long retainedClasses;
 
-        MetaspaceAuditResult(long baseline, long round1, long round2, long finalUsed, long retainedClasses) {
+        MetaspaceAuditResult(long baseline, long round1, long round2, long finalUsed,
+                             long loadedDelta, long unloadedDelta, long retainedClasses) {
             this.baseline = baseline;
             this.round1 = round1;
             this.round2 = round2;
             this.finalUsed = finalUsed;
             this.netGrowth = finalUsed - baseline;
+            this.loadedDelta = loadedDelta;
+            this.unloadedDelta = unloadedDelta;
             this.retainedClasses = retainedClasses;
         }
 
@@ -94,6 +99,14 @@ class MetaspaceLeakIT {
             return netGrowth;
         }
 
+        public long getLoadedDelta() {
+            return loadedDelta;
+        }
+
+        public long getUnloadedDelta() {
+            return unloadedDelta;
+        }
+
         public long getRetainedClasses() {
             return retainedClasses;
         }
@@ -101,6 +114,17 @@ class MetaspaceLeakIT {
 
     private static String formatMb(long bytes) {
         return String.format(Locale.ROOT, "%.2f MB", bytes / (1024.0 * 1024.0));
+    }
+
+    private static String formatDelta(long delta) {
+        if (delta < 0) {
+            return "N/A";
+        }
+        return String.format(Locale.ROOT, "%+d", delta);
+    }
+
+    private static String reportRow(String label, String nativeVal, String agentVal, String deltaVal) {
+        return String.format("  %-20s %-18s %-18s %s", label, nativeVal, agentVal, deltaVal);
     }
 
     @Test
@@ -127,18 +151,45 @@ class MetaspaceLeakIT {
                 runTestMatrixAndAudit("Agent-Treatment", AGENT_REST_URL, AGENT_CONTAINER_NAME, matrixJobs);
 
         final long netOverhead = agentResult.getNetGrowth() - nativeResult.getNetGrowth();
-        log.info("==================== [Metaspace Audit Report (A/B)] ====================");
-        log.info("Native Baseline : {}", formatMb(nativeResult.getBaseline()));
-        log.info("Native Final    : {}", formatMb(nativeResult.getFinalUsed()));
-        log.info("Native Growth   : {}", formatMb(nativeResult.getNetGrowth()));
-        log.info("Agent Baseline  : {}", formatMb(agentResult.getBaseline()));
-        log.info("Agent Round 1   : {}", formatMb(agentResult.getRound1()));
-        log.info("Agent Round 2   : {}", formatMb(agentResult.getRound2()));
-        log.info("Agent Final     : {}", formatMb(agentResult.getFinalUsed()));
-        log.info("Agent Growth    : {}", formatMb(agentResult.getNetGrowth()));
-        log.info("Net Overhead    : {}", formatMb(netOverhead));
-        log.info("Upper Growth Threshold  : {}", formatMb(METASPACE_GROWTH_THRESHOLD_BYTES));
-        log.info("Net Overhead Threshold  : {}", formatMb(MAX_NET_OVERHEAD_BYTES));
+        log.info("==================== [Metaspace A/B Audit Report] ====================");
+        log.info("{}", reportRow("", "Native(Control)", "Agent(Treatment)", "Delta"));
+        log.info("{}", reportRow("Baseline",
+                formatMb(nativeResult.getBaseline()),
+                formatMb(agentResult.getBaseline()),
+                formatMb(agentResult.getBaseline() - nativeResult.getBaseline())));
+        log.info("{}", reportRow("Round 1",
+                formatMb(nativeResult.getRound1()),
+                formatMb(agentResult.getRound1()),
+                formatMb(agentResult.getRound1() - nativeResult.getRound1())));
+        log.info("{}", reportRow("Round 2",
+                formatMb(nativeResult.getRound2()),
+                formatMb(agentResult.getRound2()),
+                formatMb(agentResult.getRound2() - nativeResult.getRound2())));
+        log.info("{}", reportRow("Final",
+                formatMb(nativeResult.getFinalUsed()),
+                formatMb(agentResult.getFinalUsed()),
+                formatMb(agentResult.getFinalUsed() - nativeResult.getFinalUsed())));
+        log.info("{}", reportRow("Growth",
+                formatMb(nativeResult.getNetGrowth()),
+                formatMb(agentResult.getNetGrowth()),
+                formatMb(netOverhead)));
+        log.info("------------------------------------------------------------------------");
+        log.info("{}", reportRow("Loaded Delta",
+                formatDelta(nativeResult.getLoadedDelta()),
+                formatDelta(agentResult.getLoadedDelta()),
+                formatDelta(agentResult.getLoadedDelta() - nativeResult.getLoadedDelta())));
+        log.info("{}", reportRow("Unloaded Delta",
+                formatDelta(nativeResult.getUnloadedDelta()),
+                formatDelta(agentResult.getUnloadedDelta()),
+                formatDelta(agentResult.getUnloadedDelta() - nativeResult.getUnloadedDelta())));
+        log.info("{}", reportRow("Retained Classes",
+                formatDelta(nativeResult.getRetainedClasses()),
+                formatDelta(agentResult.getRetainedClasses()),
+                formatDelta(agentResult.getRetainedClasses() - nativeResult.getRetainedClasses())));
+        log.info("========================================================================");
+        log.info("  Net Overhead (Agent - Native) : {}", formatMb(netOverhead));
+        log.info("  Growth Threshold (Agent)      : {}", formatMb(METASPACE_GROWTH_THRESHOLD_BYTES));
+        log.info("  Overhead Threshold (Net)      : {}", formatMb(MAX_NET_OVERHEAD_BYTES));
         log.info("========================================================================");
 
         assertThat(netOverhead)
@@ -290,8 +341,20 @@ class MetaspaceLeakIT {
         final long[] finalClassCounts = captureClassCounts(containerName);
         printClassCountDiff(targetLabel, baselineClassCounts, finalClassCounts);
 
-        final long retainedClasses = computeRetainedClasses(baselineClassCounts, finalClassCounts);
-        return new MetaspaceAuditResult(baseline, round1Used, round2Used, finalUsed, retainedClasses);
+        final long loadedDelta;
+        final long unloadedDelta;
+        final long retainedClasses;
+        if (baselineClassCounts[0] < 0 || finalClassCounts[0] < 0) {
+            loadedDelta = -1L;
+            unloadedDelta = -1L;
+            retainedClasses = -1L;
+        } else {
+            loadedDelta = finalClassCounts[0] - baselineClassCounts[0];
+            unloadedDelta = finalClassCounts[1] - baselineClassCounts[1];
+            retainedClasses = loadedDelta - unloadedDelta;
+        }
+        return new MetaspaceAuditResult(baseline, round1Used, round2Used, finalUsed,
+                loadedDelta, unloadedDelta, retainedClasses);
     }
 
 
