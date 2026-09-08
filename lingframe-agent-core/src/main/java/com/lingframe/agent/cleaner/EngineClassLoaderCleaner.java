@@ -444,7 +444,7 @@ public final class EngineClassLoaderCleaner {
                         totalRemoved += cleanObjectStreamClassCacheMap((Map<?, ?>) map, targetCl);
                     }
                 } catch (NoSuchFieldException e) {
-                    // 不同 JDK 版本字段名可能不同，跳过
+                    log.debug("ObjectStreamClass$Caches field {} not found on this JDK, skipping", fieldName);
                 }
             }
             if (totalRemoved > 0) {
@@ -470,7 +470,7 @@ public final class EngineClassLoaderCleaner {
             final Object value = entry.getValue();
 
             // 检查 key (WeakReference<Class<?>>) 的 referent
-            Class<?> keyClass = getReferenceReferentAsClass(key);
+            final Class<?> keyClass = getReferenceReferentAsClass(key);
             if (keyClass != null && keyClass.getClassLoader() == targetCl) {
                 cacheMap.remove(key);
                 removed++;
@@ -478,7 +478,7 @@ public final class EngineClassLoaderCleaner {
             }
 
             // 检查 value (SoftReference<ObjectStreamClass>) 的 referent.cl
-            Class<?> valueClass = getObjectStreamClassReferentClass(value);
+            final Class<?> valueClass = getObjectStreamClassReferentClass(value);
             if (valueClass != null && valueClass.getClassLoader() == targetCl) {
                 cacheMap.remove(key);
                 removed++;
