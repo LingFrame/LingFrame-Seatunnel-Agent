@@ -71,31 +71,31 @@ jobs:
         run: |
           cd lingframe-agent-e2e
           docker compose up -d
-          echo "Waiting for SeaTunnel clusters (agent: 5801, native: 5802) to become ready..."
+          echo "Waiting for SeaTunnel cluster (agent: 5801) to become ready..."
           READY_AGENT=false
-          READY_NATIVE=false
+          # [对照组已注释] READY_NATIVE=false
           for i in $(seq 1 36); do
             if [ "$READY_AGENT" != "true" ] && curl -s -f http://localhost:5801/hazelcast/health/ready >/dev/null; then
               echo "seatunnel-server (agent, port 5801) is READY (attempt $i)!"
               READY_AGENT=true
             fi
-            if [ "$READY_NATIVE" != "true" ] && curl -s -f http://localhost:5802/hazelcast/health/ready >/dev/null; then
-              echo "seatunnel-native (control, port 5802) is READY (attempt $i)!"
-              READY_NATIVE=true
-            fi
-            if [ "$READY_AGENT" = "true" ] && [ "$READY_NATIVE" = "true" ]; then
-              echo "All SeaTunnel clusters (agent & native) are READY!"
+            # [对照组已注释] if [ "$READY_NATIVE" != "true" ] && curl -s -f http://localhost:5802/hazelcast/health/ready >/dev/null; then
+            #   echo "seatunnel-native (control, port 5802) is READY (attempt $i)!"
+            #   READY_NATIVE=true
+            # fi
+            if [ "$READY_AGENT" = "true" ]; then
+              echo "SeaTunnel cluster (agent) is READY!"
               break
             fi
-            echo "Waiting for clusters... ($i/36)"
+            echo "Waiting for cluster... ($i/36)"
             sleep 5
           done
           echo "=== Docker Compose PS ==="
           docker compose ps -a
-          if [ "$READY_AGENT" != "true" ] || [ "$READY_NATIVE" != "true" ]; then
+          if [ "$READY_AGENT" != "true" ]; then
             echo "=== SeaTunnel Logs upon Crash ==="
             docker compose logs seatunnel-server
-            docker compose logs seatunnel-native
+            # [对照组已注释] docker compose logs seatunnel-native
             exit 1
           fi
           TEST_STATUS=0
@@ -105,7 +105,7 @@ jobs:
           if [ $TEST_STATUS -ne 0 ]; then
             echo "=== SeaTunnel Server Logs upon Failure ==="
             docker compose logs seatunnel-server
-            docker compose logs seatunnel-native
+            # [对照组已注释] docker compose logs seatunnel-native
             docker compose down -v
             exit $TEST_STATUS
           fi

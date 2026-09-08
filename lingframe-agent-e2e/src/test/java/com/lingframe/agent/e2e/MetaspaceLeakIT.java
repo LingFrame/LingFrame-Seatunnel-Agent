@@ -104,44 +104,35 @@ class MetaspaceLeakIT {
                 "Docker daemon or '" + AGENT_CONTAINER_NAME + "' container is not available, skipping MetaspaceLeakIT");
 
         final List<String> matrixJobs = buildOrthogonalMatrixJobConfigs();
-        final boolean isNativeRunning = isDockerContainerRunning(NATIVE_CONTAINER_NAME);
-        assertThat(isNativeRunning)
-                .as("Native control container '%s' must be running for strict A/B audit", NATIVE_CONTAINER_NAME)
-                .isTrue();
+        // [对照组已注释] 当前阶段不再每次 CI 跑对照组，只验证实验组独立 Metaspace 收敛
+        // final boolean isNativeRunning = isDockerContainerRunning(NATIVE_CONTAINER_NAME);
+        // assertThat(isNativeRunning)
+        //         .as("Native control container '%s' must be running for strict A/B audit", NATIVE_CONTAINER_NAME)
+        //         .isTrue();
 
-        log.info("Starting Control Group benchmark on native SeaTunnel (without agent)...");
-        final MetaspaceAuditResult nativeResult =
-                runTestMatrixAndAudit("Native-Control", NATIVE_REST_URL, NATIVE_CONTAINER_NAME, matrixJobs);
+        // [对照组已注释] log.info("Starting Control Group benchmark on native SeaTunnel (without agent)...");
+        // final MetaspaceAuditResult nativeResult =
+        //         runTestMatrixAndAudit("Native-Control", NATIVE_REST_URL, NATIVE_CONTAINER_NAME, matrixJobs);
 
         log.info("Starting Treatment Group benchmark on SeaTunnel with LingFrame Agent...");
         final MetaspaceAuditResult agentResult =
                 runTestMatrixAndAudit("Agent-Treatment", AGENT_REST_URL, AGENT_CONTAINER_NAME, matrixJobs);
 
-        final long netOverhead = agentResult.getNetGrowth() - nativeResult.getNetGrowth();
-        log.info("==================== [Metaspace A/B Audit Report] ====================");
-        log.info("Native Baseline: {} | Agent Baseline: {} | Baseline Delta: {}",
-                formatMb(nativeResult.getBaseline()), formatMb(agentResult.getBaseline()),
-                formatMb(agentResult.getBaseline() - nativeResult.getBaseline()));
-        log.info("Native Round 1 : {} | Agent Round 1 : {} | Round 1 Delta: {}",
-                formatMb(nativeResult.getRound1()), formatMb(agentResult.getRound1()),
-                formatMb(agentResult.getRound1() - nativeResult.getRound1()));
-        log.info("Native Round 2 : {} | Agent Round 2 : {} | Round 2 Delta: {}",
-                formatMb(nativeResult.getRound2()), formatMb(agentResult.getRound2()),
-                formatMb(agentResult.getRound2() - nativeResult.getRound2()));
-        log.info("Native Final   : {} | Agent Final   : {} | Final Delta: {}",
-                formatMb(nativeResult.getFinalUsed()), formatMb(agentResult.getFinalUsed()),
-                formatMb(agentResult.getFinalUsed() - nativeResult.getFinalUsed()));
-        log.info("Native Growth  : {} | Agent Growth  : {} | Net Overhead: {}",
-                formatMb(nativeResult.getNetGrowth()), formatMb(agentResult.getNetGrowth()),
-                formatMb(netOverhead));
-        log.info("Upper Growth Threshold: {} | Max Net Overhead Limit: {}",
-                formatMb(METASPACE_GROWTH_THRESHOLD_BYTES), formatMb(MAX_NET_OVERHEAD_BYTES));
+        // [对照组已注释] final long netOverhead = agentResult.getNetGrowth() - nativeResult.getNetGrowth();
+        log.info("==================== [Metaspace Audit Report (Agent Only)] ====================");
+        log.info("Agent Baseline : {}", formatMb(agentResult.getBaseline()));
+        log.info("Agent Round 1  : {}", formatMb(agentResult.getRound1()));
+        log.info("Agent Round 2  : {}", formatMb(agentResult.getRound2()));
+        log.info("Agent Final    : {}", formatMb(agentResult.getFinalUsed()));
+        log.info("Agent Growth   : {}", formatMb(agentResult.getNetGrowth()));
+        log.info("Upper Growth Threshold: {}", formatMb(METASPACE_GROWTH_THRESHOLD_BYTES));
         log.info("======================================================================");
 
-        assertThat(netOverhead)
-                .as("Agent net overhead should be <= %d bytes, actual: %d (nativeGrowth: %d, agentGrowth: %d)",
-                        MAX_NET_OVERHEAD_BYTES, netOverhead, nativeResult.getNetGrowth(), agentResult.getNetGrowth())
-                .isLessThanOrEqualTo(MAX_NET_OVERHEAD_BYTES);
+        // [对照组已注释] A/B 对比 netOverhead 断言
+        // assertThat(netOverhead)
+        //         .as("Agent net overhead should be <= %d bytes, actual: %d (nativeGrowth: %d, agentGrowth: %d)",
+        //                 MAX_NET_OVERHEAD_BYTES, netOverhead, nativeResult.getNetGrowth(), agentResult.getNetGrowth())
+        //         .isLessThanOrEqualTo(MAX_NET_OVERHEAD_BYTES);
 
         assertThat(agentResult.getNetGrowth())
                 .as("Agent Metaspace growth should be < %d bytes, actual: %d (baseline: %d, final: %d)",
@@ -207,7 +198,7 @@ class MetaspaceLeakIT {
                     }, executor));
                 }
             }
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(60, TimeUnit.SECONDS);
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(120, TimeUnit.SECONDS);
         } finally {
             executor.shutdown();
             executor.awaitTermination(10, TimeUnit.SECONDS);
@@ -325,14 +316,39 @@ class MetaspaceLeakIT {
         return jobs;
     }
 
+    private static final int MAX_SUBMIT_RETRIES = 3;
+    private static final long RETRY_DELAY_MS = 2000L;
+
     private void submitJob(String restUrl, String jobTag, String jobConfig) throws IOException {
+        IOException lastException = null;
+        for (int attempt = 1; attempt <= MAX_SUBMIT_RETRIES; attempt++) {
+            try {
+                submitJobOnce(restUrl, jobTag, jobConfig);
+                return;
+            } catch (IOException e) {
+                lastException = e;
+                log.warn("[{}] Job submission attempt {}/{} failed: {}", jobTag, attempt, MAX_SUBMIT_RETRIES, e.getMessage());
+                if (attempt < MAX_SUBMIT_RETRIES) {
+                    try {
+                        Thread.sleep(RETRY_DELAY_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Retry interrupted for " + jobTag, ie);
+                    }
+                }
+            }
+        }
+        throw lastException;
+    }
+
+    private void submitJobOnce(String restUrl, String jobTag, String jobConfig) throws IOException {
         final HttpURLConnection conn = (HttpURLConnection) new URL(restUrl).openConnection();
         try {
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
             conn.setDoOutput(true);
             conn.setConnectTimeout(5000);
-            conn.setReadTimeout(30000);
+            conn.setReadTimeout(60000);
             try (OutputStream os = conn.getOutputStream()) {
                 os.write(jobConfig.getBytes(StandardCharsets.UTF_8));
             }

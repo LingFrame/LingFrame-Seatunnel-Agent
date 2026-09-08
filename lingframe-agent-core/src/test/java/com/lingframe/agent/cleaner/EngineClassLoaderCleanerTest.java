@@ -159,31 +159,6 @@ class EngineClassLoaderCleanerTest {
         Assertions.assertFalse(mockCls.getClassLoaderReferenceCount().containsKey(leakedJobId));
     }
 
-    @Test
-    @DisplayName("验证 sweepOrphanClassLoaders 精准驱逐无活跃任务的孤儿作业并保留活跃作业")
-    void testSweepOrphanClassLoadersEvictsOnlyInactiveJobs() {
-        final MockClassLoaderService mockCls = new MockClassLoaderService();
-        final long activeJobId = 101L;
-        final long orphanJobId = 102L;
-
-        final Map<String, ClassLoader> activeMap = new HashMap<>();
-        activeMap.put("active-key", createIsolatedTestClassLoader());
-        mockCls.getClassLoaderCache().put(activeJobId, activeMap);
-
-        final Map<String, ClassLoader> orphanMap = new HashMap<>();
-        orphanMap.put("orphan-key", createIsolatedTestClassLoader());
-        mockCls.getClassLoaderCache().put(orphanJobId, orphanMap);
-
-        // 注册到 Cleaner
-        EngineClassLoaderCleaner.registerClassLoaderService(mockCls);
-
-        // 执行全局主动 Sweep，传入当前活跃作业集合，maxStaleMs 设为 0 立即生效
-        EngineClassLoaderCleaner.sweepOrphanClassLoaders(Collections.singleton(activeJobId), 0L);
-
-        // 核心断言：活跃作业不受影响，孤儿作业被剔除
-        Assertions.assertTrue(mockCls.getClassLoaderCache().containsKey(activeJobId));
-        Assertions.assertFalse(mockCls.getClassLoaderCache().containsKey(orphanJobId));
-    }
 
     /**
      * 模拟 SeaTunnel CoordinatorService 实例。

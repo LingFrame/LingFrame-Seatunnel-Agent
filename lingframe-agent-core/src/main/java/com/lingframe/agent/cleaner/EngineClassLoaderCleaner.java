@@ -1,5 +1,9 @@
 package com.lingframe.agent.cleaner;
 
+import com.hazelcast.core.DistributedObject;
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.map.IMap;
 import com.lingframe.agent.bridge.LingFrameAgentBridge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,6 +17,7 @@ import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.sql.Driver;
 import java.sql.DriverManager;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashSet;
@@ -40,8 +45,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *       单例实例。强制剥离滞留在 {@code classLoaderCache} 中的孤儿 ClassLoader，
  *       显式调用 {@code URLClassLoader.close()} 释放 Jar 句柄与底层 ClassPath 资源，
  *       排空全局静态 Schema 缓存与 JavaBean 反射缓存，并投递给底座卸载。</li>
- *   <li><b>主动全量 Sweep 巡检</b>：定时比对当前运行态作业 ID 集合，
- *       经防抖确认后主动彻底排空孤儿 ClassLoader 与已终态的 JobMaster，根除隐蔽累积。</li>
+
  * </ul>
  * 全程反射保护、全枚举字段名均按引擎源码校准，任一阶段失败都降级跳过并告警，绝不破坏引擎主流程。
  */
@@ -63,9 +67,6 @@ public final class EngineClassLoaderCleaner {
     private static final String PROTOSTUFF_SERIALIZER_TYPE =
             "org.apache.seatunnel.engine.serializer.protobuf.ProtoStuffSerializer";
 
-    /** 孤儿 ClassLoader 首次探测时间戳（防启动期微秒级误判） */
-    private static final Map<Long, Long> ORPHAN_DETECTED_TIME = new ConcurrentHashMap<>();
-    private static final long ORPHAN_STALE_MS = 1000L;
 
     /** 引擎 TaskExecutionService 实例（由 advice 捕获，Worker 单例） */
     private static volatile Object taskExecutionService;
@@ -149,7 +150,7 @@ public final class EngineClassLoaderCleaner {
         taskExecutionService = null;
         classLoaderService = null;
         coordinatorService = null;
-        ORPHAN_DETECTED_TIME.clear();
+
         JOB_CLASS_LOADERS.clear();
         CLEANED_COUNT.set(0);
     }
@@ -165,7 +166,6 @@ public final class EngineClassLoaderCleaner {
         final Object target = taskExecutionService;
         if (target == null) {
             cleanFinishedJobMasters();
-            sweepOrphanClassLoaders(Collections.emptySet());
             return;
         }
         try {
@@ -201,30 +201,12 @@ public final class EngineClassLoaderCleaner {
             }
             // 联动强制排空已完成作业在 DefaultClassLoaderService 中可能异常残留的 ClassLoader 缓存
             for (Long jobId : completedJobIds) {
-                ORPHAN_DETECTED_TIME.remove(jobId);
-                forceEvictJobClassLoaders(jobId);
-            }
 
-            // 提取运行态当前活跃作业 ID 集合
-            final Set<Long> activeJobIds = new HashSet<>();
-            final Object execVal = readFieldValue(target, FIELD_EXECUTION_CONTEXTS);
-            if (execVal instanceof Map) {
-                final Map<?, ?> execMap = (Map<?, ?>) execVal;
-                for (Object key : execMap.keySet()) {
-                    if (key != null) {
-                        final long jobId = extractJobId(key);
-                        if (jobId > 0) {
-                            activeJobIds.add(jobId);
-                        }
-                    }
-                }
+                forceEvictJobClassLoaders(jobId);
             }
 
             // Coordinator 端主动扫描：排空已完成的 JobMaster
             cleanFinishedJobMasters();
-
-            // 主动全局 Sweep：扫描 classLoaderCache 中无活跃任务的孤儿 ClassLoader
-            sweepOrphanClassLoaders(activeJobIds);
         } catch (Throwable t) {
             log.warn("EngineClassLoaderCleaner finished-context clean skipped (engine version mismatch?): {}",
                     t.getMessage());
@@ -263,7 +245,7 @@ public final class EngineClassLoaderCleaner {
             }
 
             if (jobId > 0) {
-                ORPHAN_DETECTED_TIME.remove(jobId);
+
                 forceEvictJobClassLoaders(jobId);
             }
 
@@ -294,6 +276,11 @@ public final class EngineClassLoaderCleaner {
             fieldsCleared += nullifyField(jobMaster, "checkpointManager");
             fieldsCleared += nullifyField(jobMaster, "jobImmutableInformation");
 
+            // 排空 Hazelcast 分布式 Map 中的 Job 状态与领域对象，彻底切断集群常驻 GC Root
+            if (jobId > 0) {
+                cleanHazelcastJobState(jobId);
+            }
+
             log.info("EngineClassLoaderCleaner severed Coordinator GC roots for JobMaster {} ({} fields cleared)",
                     jobId, fieldsCleared);
         } catch (Throwable t) {
@@ -302,75 +289,48 @@ public final class EngineClassLoaderCleaner {
     }
 
     /**
-     * 全局主动扫描并排空在 {@code DefaultClassLoaderService} 中滞留且已无活跃任务的孤儿 ClassLoader。
+     * 排空 Hazelcast 分布式 Map 中对应作业的领域对象，彻底斩断集群常驻 GC Roots。
      *
-     * @param activeJobIds 当前节点运行态中处于活跃状态的作业 ID 集合
+     * @param jobId 作业标识
      */
-    public static void sweepOrphanClassLoaders(Set<Long> activeJobIds) {
-        sweepOrphanClassLoaders(activeJobIds, ORPHAN_STALE_MS);
-    }
-
-    /**
-     * 全局主动扫描并排空孤儿 ClassLoader（支持指定陈旧防抖时间，便于单元测试精准校验）。
-     *
-     * @param activeJobIds 当前节点运行态中处于活跃状态的作业 ID 集合
-     * @param maxStaleMs   判定为陈旧孤儿的最小驻留毫秒数
-     */
-    public static void sweepOrphanClassLoaders(Set<Long> activeJobIds, long maxStaleMs) {
-        final Object cls = classLoaderService;
-        if (cls == null) {
+    public static void cleanHazelcastJobState(long jobId) {
+        if (jobId <= 0) {
             return;
         }
         try {
-            final Object cacheModeVal = readFieldValue(cls, FIELD_CACHE_MODE);
-            if (Boolean.TRUE.equals(cacheModeVal)) {
+            final Collection<HazelcastInstance> instances = Hazelcast.getAllHazelcastInstances();
+            if (instances == null || instances.isEmpty()) {
                 return;
             }
-            final Object cacheVal = readFieldValue(cls, FIELD_CLASS_LOADER_CACHE);
-            if (!(cacheVal instanceof Map)) {
-                return;
-            }
-            final Map<?, ?> cache = (Map<?, ?>) cacheVal;
-            if (cache.isEmpty()) {
-                ORPHAN_DETECTED_TIME.clear();
-                return;
-            }
-            final long now = System.currentTimeMillis();
-            final Set<Long> candidateJobIds = new HashSet<>();
-            for (Object key : cache.keySet()) {
-                if (key instanceof Number) {
-                    final long jobId = ((Number) key).longValue();
-                    if (jobId > 0 && (activeJobIds == null || !activeJobIds.contains(jobId))) {
-                        candidateJobIds.add(jobId);
+            final Long boxedJobId = jobId;
+            final String strJobId = String.valueOf(jobId);
+            for (HazelcastInstance hz : instances) {
+                if (hz == null) {
+                    continue;
+                }
+                for (DistributedObject obj : hz.getDistributedObjects()) {
+                    if (obj instanceof IMap) {
+                        final String name = obj.getName();
+                        if (name != null && (name.contains("job") || name.contains("checkpoint")
+                                || name.contains("engine") || name.contains("running"))) {
+                            try {
+                                final IMap<?, ?> map = (IMap<?, ?>) obj;
+                                map.remove(boxedJobId);
+                                map.remove(strJobId);
+                            } catch (Throwable ignored) {
+                                // 分布式操作降级忽略
+                            }
+                        }
                     }
                 }
-            }
-
-            // 清除重新进入活跃状态的作业记录
-            ORPHAN_DETECTED_TIME.keySet().removeIf(id -> !candidateJobIds.contains(id));
-
-            final Set<Long> toEvict = new HashSet<>();
-            for (Long jobId : candidateJobIds) {
-                final Long firstSeen = ORPHAN_DETECTED_TIME.putIfAbsent(jobId, now);
-                if (firstSeen == null) {
-                    if (maxStaleMs <= 0) {
-                        toEvict.add(jobId);
-                    }
-                } else if ((now - firstSeen) >= maxStaleMs) {
-                    toEvict.add(jobId);
-                }
-            }
-
-            for (Long jobId : toEvict) {
-                ORPHAN_DETECTED_TIME.remove(jobId);
-                forceEvictJobClassLoaders(jobId);
             }
         } catch (Throwable t) {
-            log.warn("EngineClassLoaderCleaner sweep orphan ClassLoaders skipped: {}", t.getMessage());
+            log.debug("Hazelcast job state eviction skipped: {}", t.getMessage());
         }
     }
 
     /**
+
      * 针对指定作业，强制从 {@code DefaultClassLoaderService.classLoaderCache} 中剥离残留项。
      * <p>
      * 防御场景：若作业在 Coordinator 端（DAG 解析/物理计划构建）或 Worker 调度执行中发生未捕获异常、
@@ -452,9 +412,14 @@ public final class EngineClassLoaderCleaner {
         if (cl == null || isSystemOrHostClassLoader(cl)) {
             return;
         }
-        // Metaspace 回收 100% 依赖断开 GC Root 强引用，由 JVM 垃圾收集器自然回收 ClassLoader 元数据；
-        // 绝不主动暴力调用 close() 切断底层 JarFile 句柄，避免破坏作业配置解析、延迟加载与状态反序列化生命周期。
-        log.debug("Preserving isolated job ClassLoader lifecycle without violent close: {}", cl.getClass().getName());
+        if (cl instanceof URLClassLoader) {
+            try {
+                ((URLClassLoader) cl).close();
+                log.info("Closed URLClassLoader safely: {}", cl.getClass().getName());
+            } catch (Throwable t) {
+                log.debug("URLClassLoader close skipped or failed: {}", t.getMessage());
+            }
+        }
     }
 
     /**
