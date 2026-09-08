@@ -261,7 +261,7 @@ class MetaspaceLeakIT {
         log.info("[{}] Verifying {} submitted jobs reached FINISHED state...", targetLabel, allJobIds.size());
         for (int i = 0; i < allJobIds.size(); i++) {
             final String jobId = allJobIds.get(i);
-            waitForJobFinished(restUrl, jobId, targetLabel + "-job-" + (i + 1), 60);
+            waitForJobFinished(restUrl, jobId, targetLabel + "-job-" + (i + 1), 60, containerName);
         }
         log.info("[{}] All {} jobs confirmed FINISHED.", targetLabel, allJobIds.size());
 
@@ -450,19 +450,24 @@ class MetaspaceLeakIT {
      * 轮询 SeaTunnel REST API 直到作业到达终态（FINISHED / FAILED / CANCELED）或超时。
      * <p>
      * 排除"提交成功但执行崩溃"的假象：HTTP 200 只证明作业被引擎接收，
-     * 不证明作业正常执行完成。此方法通过 {@code GET /job-info/{jobId}} 确认终态。
+     * 不证明作业正常执行完成。此方法通过 {@code GET /running-job/{jobId}} 确认终态。
+     * <p>
+     * 当 Agent javaagent 影响 Hazelcast IMap 序列化导致 API 返回 {@code {"jobId":"xxx"}}
+     * 而无 jobStatus 字段时，回退到从容器日志搜索作业状态转换记录。
      *
-     * @param submitUrl     提交作业用的 REST URL（含 /submit-job 后缀）
-     * @param jobId         作业 ID
-     * @param jobTag        日志标签
+     * @param submitUrl      提交作业用的 REST URL（含 /submit-job 后缀）
+     * @param jobId          作业 ID
+     * @param jobTag         日志标签
      * @param timeoutSeconds 单作业等待超时（秒）
+     * @param containerName  SeaTunnel 容器名（用于容器日志回退）
      */
-    private void waitForJobFinished(String submitUrl, String jobId, String jobTag, int timeoutSeconds)
-            throws IOException {
+    private void waitForJobFinished(String submitUrl, String jobId, String jobTag,
+                                    int timeoutSeconds, String containerName) throws IOException {
         final String jobInfoUrl = submitUrl.replace("submit-job", "running-job") + "/" + jobId;
         log.info("[{}] Polling job status at {}", jobTag, jobInfoUrl);
         final long deadline = System.currentTimeMillis() + timeoutSeconds * 1000L;
         String lastStatus = "UNKNOWN";
+        boolean apiNoStatusLogged = false;
         while (System.currentTimeMillis() < deadline) {
             final HttpURLConnection conn = (HttpURLConnection) new URL(jobInfoUrl).openConnection();
             try {
@@ -479,7 +484,7 @@ class MetaspaceLeakIT {
                     if (jobStatus != null) {
                         lastStatus = jobStatus;
                         if ("FINISHED".equals(jobStatus)) {
-                            log.info("[{}] Job {} -> FINISHED", jobTag, jobId);
+                            log.info("[{}] Job {} -> FINISHED (via REST API)", jobTag, jobId);
                             return;
                         }
                         if ("FAILED".equals(jobStatus) || "CANCELED".equals(jobStatus)) {
@@ -487,7 +492,23 @@ class MetaspaceLeakIT {
                                     + ") ended with status " + jobStatus + ", body: " + body);
                         }
                     } else {
-                        log.warn("[{}] Job {} response has no jobStatus field, body: {}", jobTag, jobId, body);
+                        if (!apiNoStatusLogged) {
+                            log.warn("[{}] Job {} REST API returned no jobStatus, body: {}. "
+                                    + "Falling back to container log.", jobTag, jobId, body);
+                            apiNoStatusLogged = true;
+                        }
+                        final String logStatus = checkJobStatusFromContainerLog(containerName, jobId);
+                        if (logStatus != null) {
+                            lastStatus = logStatus;
+                            if ("FINISHED".equals(logStatus)) {
+                                log.info("[{}] Job {} -> FINISHED (via container log)", jobTag, jobId);
+                                return;
+                            }
+                            if ("FAILED".equals(logStatus) || "CANCELED".equals(logStatus)) {
+                                throw new IOException("Job " + jobTag + " (id=" + jobId
+                                        + ") ended with status " + logStatus + " (via container log)");
+                            }
+                        }
                     }
                 } else {
                     final String errBody;
@@ -508,6 +529,52 @@ class MetaspaceLeakIT {
         }
         throw new IOException("Job " + jobTag + " (id=" + jobId + ") did not finish within "
                 + timeoutSeconds + " seconds, last status: " + lastStatus);
+    }
+
+    /**
+     * 从容器日志搜索指定作业的状态转换记录。
+     * <p>
+     * SeaTunnel 引擎在作业状态转换时输出日志：
+     * {@code Job {jobName} ({jobId}) turned from state RUNNING to FINISHED.}
+     * <p>
+     * 当 REST API 因 IMap 序列化问题无法返回 jobStatus 时，此方法作为回退手段，
+     * 通过 {@code docker logs --since 5m} 搜索最近 5 分钟的容器日志。
+     *
+     * @param containerName 容器名
+     * @param jobId         作业 ID
+     * @return 终态（FINISHED / FAILED / CANCELED），未找到返回 null
+     */
+    private String checkJobStatusFromContainerLog(String containerName, String jobId) throws IOException {
+        final ProcessBuilder pb = new ProcessBuilder(
+                "sh", "-c",
+                "docker logs --since 5m " + containerName + " 2>&1"
+                        + " | grep '" + jobId + ".*turned from state' | tail -1");
+        pb.redirectErrorStream(true);
+        final Process p = pb.start();
+        final String line;
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+            line = reader.readLine();
+        }
+        try {
+            p.waitFor(10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while reading container log for job " + jobId, e);
+        }
+        if (line == null || line.isEmpty()) {
+            return null;
+        }
+        if (line.contains("to FINISHED")) {
+            return "FINISHED";
+        }
+        if (line.contains("to FAILED")) {
+            return "FAILED";
+        }
+        if (line.contains("to CANCELED")) {
+            return "CANCELED";
+        }
+        return null;
     }
 
     private static String extractJsonField(String json, String fieldName) {
