@@ -179,4 +179,94 @@ class EngineClassLoaderCleanerTest {
         Assertions.assertTrue(mockCls.getClassLoaderCache().containsKey(activeJobId));
         Assertions.assertFalse(mockCls.getClassLoaderCache().containsKey(orphanJobId));
     }
+
+    /**
+     * 模拟 SeaTunnel CoordinatorService 实例。
+     */
+    static class MockCoordinatorService {
+        private final Map<Long, Object> runningJobMasterMap = new ConcurrentHashMap<>();
+
+        public Map<Long, Object> getRunningJobMasterMap() {
+            return runningJobMasterMap;
+        }
+    }
+
+    /**
+     * 模拟 SeaTunnel Server 实例。
+     */
+    static class MockSeaTunnelServer {
+        private final MockCoordinatorService coordinatorService;
+
+        MockSeaTunnelServer(MockCoordinatorService coordinatorService) {
+            this.coordinatorService = coordinatorService;
+        }
+
+        public MockCoordinatorService getCoordinatorService() {
+            return coordinatorService;
+        }
+    }
+
+    /**
+     * 模拟 SeaTunnel JobMaster 实例。
+     */
+    static class MockJobMaster {
+        private final long jobId;
+        private Object physicalPlan = new Object();
+        private Object logicalDag = new Object();
+        private Object checkpointPlanMap = new HashMap<>();
+        private Object jobDAGInfo = new Object();
+        private Object checkpointManager = new Object();
+        private Object jobImmutableInformation = new Object();
+        private final MockSeaTunnelServer seaTunnelServer;
+
+        MockJobMaster(long jobId, MockSeaTunnelServer seaTunnelServer) {
+            this.jobId = jobId;
+            this.seaTunnelServer = seaTunnelServer;
+        }
+
+        public long getJobId() {
+            return jobId;
+        }
+
+        public Object getPhysicalPlan() {
+            return physicalPlan;
+        }
+
+        public Object getLogicalDag() {
+            return logicalDag;
+        }
+    }
+
+    @Test
+    @DisplayName("验证 cleanJobMaster 彻底置空 JobMaster 内部领域大对象并从 runningJobMasterMap 中剥离")
+    void testCleanJobMasterSeveringGcRoots() {
+        final MockCoordinatorService mockCoord = new MockCoordinatorService();
+        final MockSeaTunnelServer mockServer = new MockSeaTunnelServer(mockCoord);
+        final long testJobId = 777L;
+        final MockJobMaster mockJm = new MockJobMaster(testJobId, mockServer);
+        mockCoord.getRunningJobMasterMap().put(testJobId, mockJm);
+
+        Assertions.assertNotNull(mockJm.getPhysicalPlan());
+        Assertions.assertNotNull(mockJm.getLogicalDag());
+        Assertions.assertEquals(1, mockCoord.getRunningJobMasterMap().size());
+
+        // 执行 cleanJobMaster
+        EngineClassLoaderCleaner.cleanJobMaster(mockJm);
+
+        // 核心断言 1：JobMaster 内部领域大对象全被置 null 切断 GC Root
+        Assertions.assertNull(mockJm.getPhysicalPlan());
+        Assertions.assertNull(mockJm.getLogicalDag());
+
+        // 核心断言 2：从 Coordinator 的 runningJobMasterMap 中物理剔除
+        Assertions.assertFalse(mockCoord.getRunningJobMasterMap().containsKey(testJobId));
+    }
+
+    @Test
+    @DisplayName("验证 closeClassLoaderQuietly 与 cleanStaticCaches null 安全且幂等")
+    void testClassLoaderCloseAndCacheNullSafe() {
+        Assertions.assertDoesNotThrow(() -> EngineClassLoaderCleaner.closeClassLoaderQuietly(null));
+        Assertions.assertDoesNotThrow(() -> EngineClassLoaderCleaner.cleanStaticCaches(null));
+        Assertions.assertDoesNotThrow(() -> EngineClassLoaderCleaner.cleanStaticCaches(getClass().getClassLoader()));
+    }
 }
+

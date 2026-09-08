@@ -1,6 +1,7 @@
 package com.lingframe.agent.advice;
 
 import com.lingframe.agent.bridge.LingFrameAgentBridge;
+import com.lingframe.agent.cleaner.EngineClassLoaderCleaner;
 import net.bytebuddy.asm.Advice;
 
 import java.net.URL;
@@ -60,6 +61,8 @@ public final class ClassLoaderReleaseAdvice {
             final String key = LingFrameAgentBridge.convertJarsToKey(jars);
             final boolean isRemoved = (jobMap == null || !jobMap.containsKey(key));
             if (isRemoved) {
+                EngineClassLoaderCleaner.closeClassLoaderQuietly(targetLoader);
+                EngineClassLoaderCleaner.cleanStaticCaches(targetLoader);
                 LingFrameAgentBridge.onPhysicalRelease(targetLoader);
             }
         }

@@ -4,7 +4,10 @@ import com.lingframe.agent.bridge.LingFrameAgentBridge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.beans.Introspector;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.net.URLClassLoader;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -22,13 +25,15 @@ import java.util.concurrent.atomic.AtomicLong;
  *       {@code finishedExecutionContexts} 中已完成的 {@code TaskGroupContext} 深度断引用
  *       （清空 {@code classLoaders}/{@code jars}，置空 {@code taskGroup}），并显式
  *       从 Map 中物理移除（{@code iterator.remove()}）。</li>
- *   <li><b>Coordinator / Worker 共享缓存兜底</b>：缓存 {@code DefaultClassLoaderService}
- *       单例实例。针对因异常中断导致引用计数未对称归零而滞留在 {@code classLoaderCache} 中的
- *       {@code SeaTunnelChildFirstClassLoader}，在作业终态与上下文清理时强制剥离（{@code remove(jobId)}），
- *       并主动投递给 {@link LingFrameAgentBridge#onPhysicalRelease(ClassLoader)} 执行底座卸载钩子。</li>
- *   <li><b>主动全量 Sweep 巡检</b>：定时比对当前 Worker 运行态中的 {@code executionContexts} 活跃作业 ID，
- *       若在 {@code classLoaderCache} 中发现已无任何活跃任务的孤儿作业 ClassLoader，经防抖确认后主动彻底排空，
- *       根除因 DAG 解析异常或失败未进 finished 队列引发的隐蔽类加载器堆积。</li>
+ *   <li><b>Coordinator 节点</b>：深层切断 {@code JobMaster} 内部持有的 {@code physicalPlan}、
+ *       {@code logicalDag} 等核心领域对象强引用，并从 {@code runningJobMasterMap} 中移除，
+ *       彻底切断 Master 端对 Connector 算子与类的 GC Root。</li>
+ *   <li><b>共享缓存与 ClassLoader 显式回收</b>：缓存 {@code DefaultClassLoaderService}
+ *       单例实例。强制剥离滞留在 {@code classLoaderCache} 中的孤儿 ClassLoader，
+ *       显式调用 {@code URLClassLoader.close()} 释放 Jar 句柄与底层 ClassPath 资源，
+ *       排空全局静态 Schema 缓存与 JavaBean 反射缓存，并投递给底座卸载。</li>
+ *   <li><b>主动全量 Sweep 巡检</b>：定时比对当前运行态作业 ID 集合，
+ *       经防抖确认后主动彻底排空孤儿 ClassLoader 与已终态的 JobMaster，根除隐蔽累积。</li>
  * </ul>
  * 全程反射保护、全枚举字段名均按引擎源码校准，任一阶段失败都降级跳过并告警，绝不破坏引擎主流程。
  */
@@ -46,6 +51,9 @@ public final class EngineClassLoaderCleaner {
     private static final String FIELD_CLASS_LOADER_CACHE = "classLoaderCache";
     private static final String FIELD_REF_COUNT = "classLoaderReferenceCount";
     private static final String FIELD_JOB_ID = "jobId";
+    private static final String FIELD_RUNNING_JOB_MASTER_MAP = "runningJobMasterMap";
+    private static final String PROTOSTUFF_SERIALIZER_TYPE =
+            "org.apache.seatunnel.engine.serializer.protobuf.ProtoStuffSerializer";
 
     /** 孤儿 ClassLoader 首次探测时间戳（防启动期微秒级误判） */
     private static final Map<Long, Long> ORPHAN_DETECTED_TIME = new ConcurrentHashMap<>();
@@ -56,6 +64,9 @@ public final class EngineClassLoaderCleaner {
 
     /** 引擎 DefaultClassLoaderService 实例（由 advice 捕获，单例） */
     private static volatile Object classLoaderService;
+
+    /** 引擎 CoordinatorService 实例（由 advice / JobMaster 捕获，Master 单例） */
+    private static volatile Object coordinatorService;
 
     /** 累计清理数——写入日志供观测 Metaspace 治理是否生效 */
     private static final AtomicLong CLEANED_COUNT = new AtomicLong();
@@ -88,11 +99,24 @@ public final class EngineClassLoaderCleaner {
     }
 
     /**
+     * 捕获引擎 {@code CoordinatorService} 实例（线程安全，once-only）。
+     *
+     * @param instance 织入点注入的 CoordinatorService
+     */
+    public static void registerCoordinatorService(Object instance) {
+        if (instance != null && coordinatorService == null) {
+            coordinatorService = instance;
+            log.info("EngineClassLoaderCleaner captured CoordinatorService instance");
+        }
+    }
+
+    /**
      * 重置缓存实例与内部探测状态（仅供单元测试隔离使用）。
      */
     static void resetForTesting() {
         taskExecutionService = null;
         classLoaderService = null;
+        coordinatorService = null;
         ORPHAN_DETECTED_TIME.clear();
         CLEANED_COUNT.set(0);
     }
@@ -101,11 +125,13 @@ public final class EngineClassLoaderCleaner {
      * 清空并移除引擎已完成作业上下文中的 ClassLoader / jars / taskGroup 强引用。
      * <p>
      * 幂等：直接从 {@code finishedExecutionContexts} 中移除已完成条目，断绝引擎内部堆积；
-     * 并联动排空对应作业在 {@code DefaultClassLoaderService} 中可能滞留的 ClassLoader 缓存。
+     * 并联动排空对应作业在 {@code DefaultClassLoaderService} 中可能滞留的 ClassLoader 缓存，
+     * 以及扫描排空 Coordinator 端已完成的 JobMaster 领域对象。
      */
     public static void cleanFinished() {
         final Object target = taskExecutionService;
         if (target == null) {
+            cleanFinishedJobMasters();
             sweepOrphanClassLoaders(Collections.emptySet());
             return;
         }
@@ -161,11 +187,84 @@ public final class EngineClassLoaderCleaner {
                 }
             }
 
+            // Coordinator 端主动扫描：排空已完成的 JobMaster
+            cleanFinishedJobMasters();
+
             // 主动全局 Sweep：扫描 classLoaderCache 中无活跃任务的孤儿 ClassLoader
             sweepOrphanClassLoaders(activeJobIds);
         } catch (Throwable t) {
             log.warn("EngineClassLoaderCleaner finished-context clean skipped (engine version mismatch?): {}",
                     t.getMessage());
+        }
+    }
+
+    /**
+     * 深度清理 Coordinator 端 {@code JobMaster} 内部的核心领域对象与缓存。
+     * <p>
+     * 斩断 GC Root：
+     * <ol>
+     *   <li>强制驱逐 {@code DefaultClassLoaderService} 中该作业的 ClassLoader；</li>
+     *   <li>捕获 {@code CoordinatorService} 并确保从 {@code runningJobMasterMap} 中移除该作业；</li>
+     *   <li>反射将 JobMaster 内部持有的 {@code physicalPlan}、{@code logicalDag}、
+     *       {@code checkpointPlanMap}、{@code jobDAGInfo}、{@code checkpointManager}、
+     *       {@code jobImmutableInformation} 彻底深层置 null，彻底解绑由 Connector ClassLoader
+     *       加载的 Action、CatalogTable 等类实例。</li>
+     * </ol>
+     *
+     * @param jobMaster 引擎 JobMaster 实例
+     */
+    public static void cleanJobMaster(Object jobMaster) {
+        if (jobMaster == null) {
+            return;
+        }
+        try {
+            long jobId = -1L;
+            try {
+                final Method getJobIdMethod = jobMaster.getClass().getMethod("getJobId");
+                final Object idObj = getJobIdMethod.invoke(jobMaster);
+                if (idObj instanceof Number) {
+                    jobId = ((Number) idObj).longValue();
+                }
+            } catch (Throwable t) {
+                log.debug("Failed to extract jobId from JobMaster: {}", t.getMessage());
+            }
+
+            if (jobId > 0) {
+                ORPHAN_DETECTED_TIME.remove(jobId);
+                forceEvictJobClassLoaders(jobId);
+            }
+
+            // 尝试捕获 CoordinatorService 并从 runningJobMasterMap 中移除
+            try {
+                final Object server = readFieldValue(jobMaster, "seaTunnelServer");
+                if (server != null) {
+                    final Method getCoordMethod = server.getClass().getMethod("getCoordinatorService");
+                    final Object coord = getCoordMethod.invoke(server);
+                    if (coord != null) {
+                        registerCoordinatorService(coord);
+                        final Object runningMap = readFieldValue(coord, FIELD_RUNNING_JOB_MASTER_MAP);
+                        if (runningMap instanceof Map && jobId > 0) {
+                            ((Map<?, ?>) runningMap).remove(jobId);
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                log.debug("CoordinatorService map eviction skipped: {}", t.getMessage());
+            }
+
+            // 深度解绑 JobMaster 内部核心大对象，切断 GC Root
+            int fieldsCleared = 0;
+            fieldsCleared += nullifyField(jobMaster, "physicalPlan");
+            fieldsCleared += nullifyField(jobMaster, "logicalDag");
+            fieldsCleared += nullifyField(jobMaster, "checkpointPlanMap");
+            fieldsCleared += nullifyField(jobMaster, "jobDAGInfo");
+            fieldsCleared += nullifyField(jobMaster, "checkpointManager");
+            fieldsCleared += nullifyField(jobMaster, "jobImmutableInformation");
+
+            log.info("EngineClassLoaderCleaner severed Coordinator GC roots for JobMaster {} ({} fields cleared)",
+                    jobId, fieldsCleared);
+        } catch (Throwable t) {
+            log.warn("EngineClassLoaderCleaner failed to clean JobMaster: {}", t.getMessage());
         }
     }
 
@@ -278,6 +377,8 @@ public final class EngineClassLoaderCleaner {
                             final ClassLoader cl = (ClassLoader) clObj;
                             log.warn("Force evicted leaked ClassLoader [{}] for job {} due to asymmetric reference count",
                                     cl.getClass().getName(), jobId);
+                            closeClassLoaderQuietly(cl);
+                            cleanStaticCaches(cl);
                             LingFrameAgentBridge.onPhysicalRelease(cl);
                             evicted++;
                         }
@@ -289,6 +390,133 @@ public final class EngineClassLoaderCleaner {
             }
         } catch (Throwable t) {
             log.warn("EngineClassLoaderCleaner force evict for job {} failed: {}", jobId, t.getMessage());
+        }
+    }
+
+    /**
+     * 安全显式关闭 URLClassLoader 释放底层 JAR 句柄与 ClassPath 映射。
+     *
+     * @param cl 类加载器
+     */
+    public static void closeClassLoaderQuietly(ClassLoader cl) {
+        if (cl instanceof URLClassLoader) {
+            try {
+                ((URLClassLoader) cl).close();
+                log.info("Explicitly closed URLClassLoader: {}", cl.getClass().getName());
+            } catch (Throwable t) {
+                log.warn("Failed to close URLClassLoader {}: {}", cl.getClass().getName(), t.getMessage());
+            }
+        }
+    }
+
+    /**
+     * 清理 JVM 全局静态类型与反射缓存中关联目标 ClassLoader 的条目。
+     *
+     * @param cl 类加载器
+     */
+    public static void cleanStaticCaches(ClassLoader cl) {
+        if (cl == null) {
+            return;
+        }
+        // 1. 清理 JavaBean 属性反射缓存
+        try {
+            Introspector.flushCaches();
+        } catch (Throwable t) {
+            log.debug("Introspector.flushCaches failed: {}", t.getMessage());
+        }
+
+        // 2. 清理 ProtoStuffSerializer 的 SCHEMA_CACHE（若存在）
+        try {
+            final Class<?> serializerClass = Class.forName(
+                    PROTOSTUFF_SERIALIZER_TYPE, false, ClassLoader.getSystemClassLoader());
+            final Field cacheField = serializerClass.getDeclaredField("SCHEMA_CACHE");
+            cacheField.setAccessible(true);
+            final Object cacheObj = cacheField.get(null);
+            if (cacheObj instanceof Map) {
+                final Map<?, ?> schemaCache = (Map<?, ?>) cacheObj;
+                int removed = 0;
+                final Iterator<?> it = schemaCache.keySet().iterator();
+                while (it.hasNext()) {
+                    final Object k = it.next();
+                    if (k instanceof Class && ((Class<?>) k).getClassLoader() == cl) {
+                        it.remove();
+                        removed++;
+                    }
+                }
+                if (removed > 0) {
+                    log.info("Cleaned {} cached schemas from ProtoStuffSerializer for ClassLoader {}",
+                            removed, cl.getClass().getName());
+                }
+            }
+        } catch (Throwable t) {
+            log.debug("ProtoStuffSerializer cache clean skipped: {}", t.getMessage());
+        }
+    }
+
+    /**
+     * 扫描 Coordinator 端的已完成 JobMaster 并执行深层清理。
+     */
+    private static void cleanFinishedJobMasters() {
+        final Object coord = coordinatorService;
+        if (coord == null) {
+            return;
+        }
+        try {
+            final Object runningMap = readFieldValue(coord, FIELD_RUNNING_JOB_MASTER_MAP);
+            if (runningMap instanceof Map) {
+                final Map<?, ?> map = (Map<?, ?>) runningMap;
+                if (!map.isEmpty()) {
+                    final Iterator<? extends Map.Entry<?, ?>> it = map.entrySet().iterator();
+                    while (it.hasNext()) {
+                        final Map.Entry<?, ?> entry = it.next();
+                        final Object jm = entry.getValue();
+                        if (jm != null && isJobMasterFinished(jm)) {
+                            cleanJobMaster(jm);
+                            it.remove();
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            log.debug("Coordinator clean finished JobMasters skipped: {}", t.getMessage());
+        }
+    }
+
+    /**
+     * 判断 JobMaster 是否已处于终态。
+     */
+    private static boolean isJobMasterFinished(Object jm) {
+        try {
+            final Method getStatusMethod = jm.getClass().getMethod("getJobStatus");
+            final Object status = getStatusMethod.invoke(jm);
+            if (status != null) {
+                final Method isEndStateMethod = status.getClass().getMethod("isEndState");
+                return Boolean.TRUE.equals(isEndStateMethod.invoke(status));
+            }
+        } catch (Throwable t) {
+            log.debug("Failed to determine JobMaster end state: {}", t.getMessage());
+        }
+        return false;
+    }
+
+    /**
+     * 反射将对象的私有字段置 null。
+     *
+     * @param target    目标实例
+     * @param fieldName 字段名
+     * @return 成功置空返回 1，字段不存在或失败返回 0
+     */
+    private static int nullifyField(Object target, String fieldName) {
+        try {
+            final Field field = target.getClass().getDeclaredField(fieldName);
+            field.setAccessible(true);
+            field.set(target, null);
+            return 1;
+        } catch (NoSuchFieldException e) {
+            return 0;
+        } catch (Throwable t) {
+            log.debug("Failed to nullify field {}: {}", fieldName, t.getMessage());
+            return 0;
         }
     }
 

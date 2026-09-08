@@ -151,6 +151,8 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
         log.info("Triggering physical release for ClassLoader {}", classLoader.getClass().getName());
         ReleasedClassLoaderRegistry.register(classLoader);
         EngineSafeThreadReferenceUnloadHook.resetThreadContextClassLoaders(CALLER_LING_ID, classLoader);
+        EngineClassLoaderCleaner.closeClassLoaderQuietly(classLoader);
+        EngineClassLoaderCleaner.cleanStaticCaches(classLoader);
         if (unloadCoordinator != null) {
             unloadCoordinator.onFailureCleanup(classLoader);
             log.debug("Unload coordinator completed JVM-level cleanup");
