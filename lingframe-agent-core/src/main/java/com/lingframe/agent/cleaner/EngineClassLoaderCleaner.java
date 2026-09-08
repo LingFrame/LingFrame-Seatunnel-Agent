@@ -195,34 +195,9 @@ public final class EngineClassLoaderCleaner {
                     }
                 }
             }
-            // 同步清理 executionContexts 中可能残留的条目（异常退出时 taskDone 未被调用）
-            try {
-                final Object execValue = readFieldValue(target, FIELD_EXECUTION_CONTEXTS);
-                if (execValue instanceof Map) {
-                    final Map<?, ?> execMap = (Map<?, ?>) execValue;
-                    if (!execMap.isEmpty()) {
-                        final Iterator<? extends Map.Entry<?, ?>> it = execMap.entrySet().iterator();
-                        while (it.hasNext()) {
-                            final Map.Entry<?, ?> entry = it.next();
-                            final Object key = entry.getKey();
-                            if (key != null) {
-                                final long jobId = extractJobId(key);
-                                if (jobId > 0) {
-                                    completedJobIds.add(jobId);
-                                }
-                            }
-                            final Object ctx = entry.getValue();
-                            if (ctx != null) {
-                                cleanContextFields(ctx);
-                            }
-                            it.remove();
-                            cleaned++;
-                        }
-                    }
-                }
-            } catch (Throwable t2) {
-                log.debug("executionContexts clean skipped: {}", t2.getMessage());
-            }
+            // 注意：executionContexts 是正在执行中的作业上下文，绝不能被定时清理器移除。
+            // 之前这里无条件清除 executionContexts 导致 AssignSplitOperation 找不到目标 TaskGroup，
+            // 作业卡在 "wait split!" 无法完成。已删除该清理逻辑，让引擎自行管理正在执行中的上下文。
             if (cleaned > 0) {
                 final long total = CLEANED_COUNT.addAndGet(cleaned);
                 log.info("EngineClassLoaderCleaner purged {} task-context entries (total: {})",
@@ -233,6 +208,9 @@ public final class EngineClassLoaderCleaner {
 
                 forceEvictJobClassLoaders(jobId);
             }
+
+            // Fallback：如果 coordinatorService 未被 advice 捕获，通过 NodeEngine 主动获取
+            tryCaptureCoordinatorService();
 
             // Coordinator 端主动扫描：排空已完成的 JobMaster
             cleanFinishedJobMasters();
@@ -620,6 +598,37 @@ public final class EngineClassLoaderCleaner {
             log.debug("Failed to clean {} for job {}: {}", fieldName, jobId, t.getMessage());
         }
         return 0;
+    }
+
+    /**
+     * 尝试通过 TaskExecutionService → NodeEngine → SeaTunnelServer 捕获 CoordinatorService。
+     * <p>
+     * Fallback：当 JobMasterCleanJobAdvice 未触发时（JobMaster.cleanJob 尚未执行），
+     * 通过反射链主动获取 CoordinatorService 实例，确保 cleanFinishedJobMasters 能工作。
+     */
+    private static void tryCaptureCoordinatorService() {
+        if (coordinatorService != null || taskExecutionService == null) {
+            return;
+        }
+        try {
+            final Object nodeEngine = readFieldValue(taskExecutionService, "nodeEngine");
+            if (nodeEngine == null) {
+                return;
+            }
+            final Method getServiceMethod = nodeEngine.getClass().getMethod("getService", String.class);
+            final Object server = getServiceMethod.invoke(nodeEngine, "st:impl:seaTunnelServer");
+            if (server == null) {
+                return;
+            }
+            final Method getCoordMethod = server.getClass().getMethod("getCoordinatorService");
+            final Object coord = getCoordMethod.invoke(server);
+            if (coord != null) {
+                registerCoordinatorService(coord);
+                log.info("EngineClassLoaderCleaner captured CoordinatorService via NodeEngine fallback");
+            }
+        } catch (Throwable t) {
+            log.debug("Failed to capture CoordinatorService via NodeEngine: {}", t.getMessage());
+        }
     }
 
     /**
