@@ -215,6 +215,17 @@ public final class EngineClassLoaderCleaner {
 
             // Coordinator 端主动扫描：排空已完成的 JobMaster
             cleanFinishedJobMasters();
+
+            // 安全清理 executionContexts 中已完成作业的残留条目。
+            // 仅移除不在 runningJobMasterMap 中的作业（已完成作业），避免误删正在执行的作业。
+            // 之前的教训：无条件清除 executionContexts 导致 AssignSplitOperation 找不到目标 TaskGroup。
+            // 现在通过 runningJobMasterMap 精确区分活跃/已完成作业，安全清理。
+            cleanStaleExecutionContexts(target, completedJobIds);
+
+            // 对 executionContexts 清理新增的 completedJobIds 联动 forceEvict
+            for (Long jobId : completedJobIds) {
+                forceEvictJobClassLoaders(jobId);
+            }
         } catch (Throwable t) {
             log.warn("EngineClassLoaderCleaner finished-context clean skipped (engine version mismatch?): {}",
                     t.getMessage());
@@ -763,6 +774,93 @@ public final class EngineClassLoaderCleaner {
         } catch (Throwable t) {
             log.debug("Coordinator clean finished JobMasters skipped: {}", t.getMessage());
         }
+    }
+
+    /**
+     * 安全清理 executionContexts 中已完成作业的残留条目。
+     * <p>
+     * 仅移除不在 runningJobMasterMap 中的作业条目，避免误删正在执行的作业。
+     * 之前的教训：无条件清除 executionContexts 导致 AssignSplitOperation 找不到目标 TaskGroup。
+     * 现在通过 runningJobMasterMap 精确区分活跃/已完成作业，安全清理。
+     *
+     * @param tes TaskExecutionService 实例
+     * @param completedJobIds 已完成作业 ID 集合（联动 forceEvict）
+     */
+    private static void cleanStaleExecutionContexts(Object tes, Set<Long> completedJobIds) {
+        if (tes == null || completedJobIds == null) {
+            return;
+        }
+        try {
+            final Set<Long> activeJobIds = collectActiveJobIds();
+            if (activeJobIds == null) {
+                return;
+            }
+            final Object execCtxVal = readFieldValue(tes, FIELD_EXECUTION_CONTEXTS);
+            if (!(execCtxVal instanceof Map)) {
+                return;
+            }
+            final Map<?, ?> execCtxMap = (Map<?, ?>) execCtxVal;
+            if (execCtxMap.isEmpty()) {
+                return;
+            }
+            int staleRemoved = 0;
+            final Iterator<? extends Map.Entry<?, ?>> it = execCtxMap.entrySet().iterator();
+            while (it.hasNext()) {
+                final Map.Entry<?, ?> entry = it.next();
+                final Object key = entry.getKey();
+                if (key == null) {
+                    continue;
+                }
+                final long jobId = extractJobId(key);
+                if (jobId <= 0) {
+                    continue;
+                }
+                if (!activeJobIds.contains(jobId)) {
+                    final Object ctx = entry.getValue();
+                    if (ctx != null) {
+                        cleanContextFields(ctx);
+                    }
+                    it.remove();
+                    staleRemoved++;
+                    completedJobIds.add(jobId);
+                    log.info("EngineClassLoaderCleaner force-purged stale executionContexts entry for completed job {}",
+                            jobId);
+                }
+            }
+            if (staleRemoved > 0) {
+                log.info("EngineClassLoaderCleaner force-purged {} stale executionContexts entries (active jobs: {})",
+                        staleRemoved, activeJobIds.size());
+            }
+        } catch (Throwable t) {
+            log.debug("Failed to clean stale executionContexts: {}", t.getMessage());
+        }
+    }
+
+    /**
+     * 从 CoordinatorService.runningJobMasterMap 中收集活跃作业 ID 集合。
+     *
+     * @return 活跃作业 ID 集合；coordinatorService 不可用时返回 null（调用方应跳过清理）
+     */
+    private static Set<Long> collectActiveJobIds() {
+        final Object coord = coordinatorService;
+        if (coord == null) {
+            return null;
+        }
+        final Set<Long> activeIds = new HashSet<>();
+        try {
+            final Object runningMap = readFieldValue(coord, FIELD_RUNNING_JOB_MASTER_MAP);
+            if (runningMap instanceof Map) {
+                for (Object key : ((Map<?, ?>) runningMap).keySet()) {
+                    if (key instanceof Number) {
+                        activeIds.add(((Number) key).longValue());
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            log.debug("Failed to collect active job IDs: {}", t.getMessage());
+            return null;
+        }
+        return activeIds;
     }
 
     /**

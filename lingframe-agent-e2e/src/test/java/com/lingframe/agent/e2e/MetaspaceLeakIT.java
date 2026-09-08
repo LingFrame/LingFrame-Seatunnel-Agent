@@ -245,7 +245,8 @@ class MetaspaceLeakIT {
         }
 
         // 4. 等待引擎将所有异步作业生命周期完成与释放
-        Thread.sleep(10000);
+        // Kafka source 作业消费全量消息可能需要较长时间，30 秒确保所有作业完成
+        Thread.sleep(30000);
 
         // 5. 阶段三：强制 Full GC 并采样终态 Metaspace
         forceFullGcInContainer(containerName);
