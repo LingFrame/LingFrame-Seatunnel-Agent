@@ -639,14 +639,15 @@ class MetaspaceLeakIT {
     private void forceFullGcInContainer(String containerName) {
         try {
             final String pid = resolveJavaPid(containerName);
-            // 第一次 Full GC：回收只被 weak/soft 引用持有的 ClassLoader
-            Process p = new ProcessBuilder("docker", "exec", containerName, "jcmd", pid, "GC.run").start();
-            p.waitFor(5, TimeUnit.SECONDS);
-            Thread.sleep(2000);
-            // 第二次 Full GC：卸载已回收 ClassLoader 加载的类元数据（Metaspace 释放）
-            p = new ProcessBuilder("docker", "exec", containerName, "jcmd", pid, "GC.run").start();
-            p.waitFor(5, TimeUnit.SECONDS);
-            Thread.sleep(2000);
+            // 三轮 Full GC 保障类元数据彻底卸载：
+            // 第一轮：回收只被 weak/soft 引用持有的 ClassLoader
+            // 第二轮：回收第一轮 GC 后因 WeakHashMap expunge / 缓存清理才暴露的 ClassLoader
+            // 第三轮：卸载已回收 ClassLoader 加载的类元数据（Metaspace 释放）
+            for (int i = 0; i < 3; i++) {
+                final Process p = new ProcessBuilder("docker", "exec", containerName, "jcmd", pid, "GC.run").start();
+                p.waitFor(5, TimeUnit.SECONDS);
+                Thread.sleep(2000);
+            }
         } catch (InterruptedException e) {
             log.warn("Full GC trigger interrupted in container {}: {}", containerName, e.getMessage());
             Thread.currentThread().interrupt();
