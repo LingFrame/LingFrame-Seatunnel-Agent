@@ -459,7 +459,8 @@ class MetaspaceLeakIT {
      */
     private void waitForJobFinished(String submitUrl, String jobId, String jobTag, int timeoutSeconds)
             throws IOException {
-        final String jobInfoUrl = submitUrl.replace("submit-job", "job-info") + "/" + jobId;
+        final String jobInfoUrl = submitUrl.replace("submit-job", "running-job") + "/" + jobId;
+        log.info("[{}] Polling job status at {}", jobTag, jobInfoUrl);
         final long deadline = System.currentTimeMillis() + timeoutSeconds * 1000L;
         String lastStatus = "UNKNOWN";
         while (System.currentTimeMillis() < deadline) {
@@ -485,7 +486,15 @@ class MetaspaceLeakIT {
                             throw new IOException("Job " + jobTag + " (id=" + jobId
                                     + ") ended with status " + jobStatus + ", body: " + body);
                         }
+                    } else {
+                        log.warn("[{}] Job {} response has no jobStatus field, body: {}", jobTag, jobId, body);
                     }
+                } else {
+                    final String errBody;
+                    try (InputStream es = conn.getErrorStream()) {
+                        errBody = es != null ? readAll(es) : "(no error stream)";
+                    }
+                    log.warn("[{}] Job {} HTTP {} - error: {}", jobTag, jobId, responseCode, errBody);
                 }
             } finally {
                 conn.disconnect();
