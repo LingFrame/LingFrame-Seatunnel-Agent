@@ -13,9 +13,9 @@
         <Bug pattern="ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD"/>
     </Match>
 
-    <!-- Adapter 反射调用是 Agent 的固有需求#1 -->
+    <!-- Adapter 与 Cleaner 反射调用是 Agent 治理宿主的固有需求 -->
     <Match>
-        <Class name="~.*\.adapter\..*"/>
+        <Class name="~.*(\.adapter|\.cleaner)\..*"/>
         <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED,REC_CATCH_EXCEPTION,EI_EXPOSE_REP2"/>
     </Match>
 

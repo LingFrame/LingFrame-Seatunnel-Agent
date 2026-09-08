@@ -476,9 +476,7 @@ public final class EngineClassLoaderCleaner {
         try {
             final Class<?> serializerClass = Class.forName(
                     PROTOSTUFF_SERIALIZER_TYPE, false, ClassLoader.getSystemClassLoader());
-            final Field cacheField = serializerClass.getDeclaredField("SCHEMA_CACHE");
-            cacheField.setAccessible(true);
-            final Object cacheObj = cacheField.get(null);
+            final Object cacheObj = readStaticFieldValue(serializerClass, "SCHEMA_CACHE");
             if (cacheObj instanceof Map) {
                 final Map<?, ?> schemaCache = (Map<?, ?>) cacheObj;
                 int removed = 0;
@@ -618,5 +616,12 @@ public final class EngineClassLoaderCleaner {
         if (value instanceof Map) {
             ((Map<?, ?>) value).clear();
         }
+    }
+
+    /** 读取类的静态私有字段值。 */
+    private static Object readStaticFieldValue(Class<?> clazz, String fieldName) throws Exception {
+        final Field field = clazz.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return field.get(null);
     }
 }
