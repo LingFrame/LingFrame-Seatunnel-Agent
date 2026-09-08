@@ -63,13 +63,15 @@ class MetaspaceLeakIT {
         private final long round2;
         private final long finalUsed;
         private final long netGrowth;
+        private final long retainedClasses;
 
-        MetaspaceAuditResult(long baseline, long round1, long round2, long finalUsed) {
+        MetaspaceAuditResult(long baseline, long round1, long round2, long finalUsed, long retainedClasses) {
             this.baseline = baseline;
             this.round1 = round1;
             this.round2 = round2;
             this.finalUsed = finalUsed;
             this.netGrowth = finalUsed - baseline;
+            this.retainedClasses = retainedClasses;
         }
 
         public long getBaseline() {
@@ -90,6 +92,10 @@ class MetaspaceLeakIT {
 
         public long getNetGrowth() {
             return netGrowth;
+        }
+
+        public long getRetainedClasses() {
+            return retainedClasses;
         }
     }
 
@@ -134,13 +140,14 @@ class MetaspaceLeakIT {
         //                 MAX_NET_OVERHEAD_BYTES, netOverhead, nativeResult.getNetGrowth(), agentResult.getNetGrowth())
         //         .isLessThanOrEqualTo(MAX_NET_OVERHEAD_BYTES);
 
-        // Metaspace 超标时自动抓取 heap dump，供 MAT 分析定位残留 GC Root
-        if (agentResult.getNetGrowth() >= METASPACE_GROWTH_THRESHOLD_BYTES) {
+        // 只要还有未回收的类（retained > 0），不管测试通过与否都抓 heap dump，供 MAT 分析定位残留 GC Root
+        // 除非类全部回收（retained == 0），才跳过 dump
+        if (agentResult.getRetainedClasses() > 0) {
             try {
                 final String pid = resolveJavaPid(AGENT_CONTAINER_NAME);
                 final String dumpPath = "/tmp/heapdump-" + System.currentTimeMillis() + ".hprof";
-                log.info("[Agent-Treatment] Metaspace leak detected, generating heap dump at {} in container {}",
-                        dumpPath, AGENT_CONTAINER_NAME);
+                log.info("[Agent-Treatment] Retained {} classes, generating heap dump at {} in container {}",
+                        agentResult.getRetainedClasses(), dumpPath, AGENT_CONTAINER_NAME);
                 final ProcessBuilder dumpPb = new ProcessBuilder(
                         "docker", "exec", AGENT_CONTAINER_NAME,
                         "jcmd", pid, "GC.heap_dump", dumpPath);
@@ -263,7 +270,8 @@ class MetaspaceLeakIT {
         final long[] finalClassCounts = captureClassCounts(containerName);
         printClassCountDiff(targetLabel, baselineClassCounts, finalClassCounts);
 
-        return new MetaspaceAuditResult(baseline, round1Used, round2Used, finalUsed);
+        final long retainedClasses = computeRetainedClasses(baselineClassCounts, finalClassCounts);
+        return new MetaspaceAuditResult(baseline, round1Used, round2Used, finalUsed, retainedClasses);
     }
 
 
@@ -477,6 +485,19 @@ class MetaspaceLeakIT {
             log.warn("jstat -class capture failed in container {}: {}", containerName, e.getMessage());
             return new long[]{-1L, -1L};
         }
+    }
+
+    /**
+     * 计算 retained classes（loaded delta - unloaded delta），即未卸载的类元数据净增数。
+     * 若 baseline 或 final 采样失败（含 -1），返回 -1 表示不可用。
+     */
+    private static long computeRetainedClasses(long[] baseline, long[] finalSample) {
+        if (baseline[0] < 0 || finalSample[0] < 0) {
+            return -1L;
+        }
+        final long loadedDelta = finalSample[0] - baseline[0];
+        final long unloadedDelta = finalSample[1] - baseline[1];
+        return loadedDelta - unloadedDelta;
     }
 
     /**
