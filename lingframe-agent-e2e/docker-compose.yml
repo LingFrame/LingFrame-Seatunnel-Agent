@@ -87,6 +87,7 @@ services:
       - "5802:5801"
     environment:
       - SEATUNNEL_HOME=/opt/seatunnel
+      - "JAVA_TOOL_OPTIONS=-XX:+UnlockDiagnosticVMOptions"
     volumes:
       - ./src/test/resources/seatunnel.yaml:/opt/seatunnel/config/seatunnel.yaml
       - ./docker/hazelcast-native.yaml:/opt/seatunnel/config/hazelcast.yaml

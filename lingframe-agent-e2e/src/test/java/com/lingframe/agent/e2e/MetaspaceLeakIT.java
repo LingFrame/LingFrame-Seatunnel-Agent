@@ -15,8 +15,11 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -435,6 +438,115 @@ class MetaspaceLeakIT {
                 targetLabel, baseline[1], finalSample[1], unloadedDelta);
         log.info("[{}]   retained (loaded - unloaded) delta: +{} classes => 类元数据未卸载证候 {}",
                 targetLabel, retained, retained > 0 ? "成立（Metaspace 泄漏）" : "不成立");
+        log.info("[{}] ===========================================================", targetLabel);
+    }
+
+    /**
+     * 执行 {@code jcmd <pid> GC.class_stats} 捕获存活类的"每个类同名字符串出现次数"。
+     * <p>
+     * GC.class_stats 按 ClassLoader 输出，同一类名被 N 个 ClassLoader 加载即出现 N 次——
+     * 该计数正是"类元数据被多少份 loader 强持有、未随 job 回收"的直接度量。
+     * 需要容器 JVM 带 -XX:+UnlockDiagnosticVMOptions（经 JAVA_TOOL_OPTIONS 注入才确保生效）。
+     * 失败时返回空 Map，不影响主审计。
+     */
+    private Map<String, Integer> captureClassStats(String containerName) {
+        final Map<String, Integer> counts = new HashMap<>();
+        try {
+            final String pid = resolveJavaPid(containerName);
+            final ProcessBuilder pb = new ProcessBuilder(
+                    "docker", "exec", containerName, "jcmd", pid, "GC.class_stats");
+            pb.redirectErrorStream(true);
+            final Process p = pb.start();
+            final List<String> lines = new ArrayList<>();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    lines.add(line.trim());
+                }
+            }
+            p.waitFor(25, TimeUnit.SECONDS);
+            for (String line : lines) {
+                final String cls = firstClassToken(line);
+                if (cls != null) {
+                    counts.merge(cls, 1, Integer::sum);
+                }
+            }
+            if (counts.isEmpty()) {
+                log.warn("GC.class_stats returned no classes in container {} (unlock may be missing via JAVA_TOOL_OPTIONS); head: {}",
+                        containerName, lines.isEmpty() ? "" : String.join(" | ", lines.subList(0, Math.min(3, lines.size()))));
+            }
+        } catch (Exception e) {
+            log.warn("GC.class_stats capture failed in container {}: {}", containerName, e.getMessage());
+        }
+        return counts;
+    }
+
+    /**
+     * 从 GC.class_stats 的一行中提取类名 token（形如 {@code a/b/C} 或 {@code pkg.Cls}），
+     * 跳过索引数字列与表头。提取不到返回 {@code null}。
+     */
+    private String firstClassToken(String line) {
+        if (line == null || line.isEmpty()) {
+            return null;
+        }
+        if (line.startsWith("=") || line.startsWith("GC class") || line.startsWith("Class")) {
+            return null;
+        }
+        for (String t : line.split("\\s+")) {
+            if (t.length() <= 1 || t.matches("\\d+")) {
+                continue;
+            }
+            if (!Character.isLetter(t.charAt(0))) {
+                continue;
+            }
+            if (t.contains("/") || t.contains(".")) {
+                return t;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 打印引擎/连接器类在 final 较 baseline 的净增 loader 持有副本，定位具体泄漏类。
+     * <p>
+     * 只统计命中 SeaTunnel/连接器/MySQL/Kafka 关键字的类，打印净增 Top 15，避免刷日志。
+     */
+    private void printClassStatsDiff(String targetLabel,
+                                     Map<String, Integer> baseline,
+                                     Map<String, Integer> finalSample) {
+        log.info("[{}] ========== Class Stats Growth (GC.class_stats; +copies = 被多 ClassLoader 持有未回收) " + "==========",
+                targetLabel);
+        if (baseline.isEmpty() || finalSample.isEmpty()) {
+            log.info("[{}]   (class stats unavailable — 需 JAVA_TOOL_OPTIONS 注入 -XX:+UnlockDiagnosticVMOptions)",
+                    targetLabel);
+            log.info("[{}] ===========================================================", targetLabel);
+            return;
+        }
+        final List<String> includes = Arrays.asList(
+                "org/apache/seatunnel", "SeaTunnelChildFirstClassLoader", "com/mysql", "org/apache/kafka");
+        final Map<String, Integer> retained = new HashMap<>();
+        for (Map.Entry<String, Integer> e : finalSample.entrySet()) {
+            final String cls = e.getKey();
+            if (includes.stream().noneMatch(cls::contains)) {
+                continue;
+            }
+            final int net = e.getValue() - baseline.getOrDefault(cls, 0);
+            if (net > 0) {
+                retained.put(cls, net);
+            }
+        }
+        if (retained.isEmpty()) {
+            log.info("[{}]   no retained connector/engine class growth (类均已卸载或无新增占用)", targetLabel);
+        } else {
+            final List<Map.Entry<String, Integer>> entries = new ArrayList<>(retained.entrySet());
+            entries.sort((a, b) -> b.getValue() - a.getValue());
+            final int top = Math.min(15, entries.size());
+            for (int i = 0; i < top; i++) {
+                log.info("[{}]   +{} loader copies  {}", targetLabel,
+                        entries.get(i).getValue(), entries.get(i).getKey());
+            }
+        }
         log.info("[{}] ===========================================================", targetLabel);
     }
 
