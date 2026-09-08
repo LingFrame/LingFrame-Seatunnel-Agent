@@ -7,6 +7,7 @@ import com.lingframe.agent.bridge.LingFrameAgentBridge;
 import com.lingframe.agent.config.AgentConfig;
 import com.lingframe.agent.advice.ClassLoaderReleaseAdvice;
 import com.lingframe.agent.advice.ClassLoaderServiceCacheAdvice;
+import com.lingframe.agent.advice.ClassLoaderServiceGetAdvice;
 import com.lingframe.agent.advice.JobMasterCleanJobAdvice;
 import com.lingframe.agent.advice.TaskExecutionAdvice;
 import com.lingframe.agent.advice.TaskExecutionServiceCacheAdvice;
@@ -370,8 +371,12 @@ public final class LingFrameAgentActivationRunner {
                                     ClassLoaderServiceCacheAdvice.class.getName())
                             .advice(ElementMatchers.named("releaseClassLoader")
                                     .and(ElementMatchers.takesArgument(0, ElementMatchers.named("long"))),
-                                    ClassLoaderReleaseAdvice.class.getName()));
-            log.info("ClassLoaderReleaseAdvice & ClassLoaderServiceCacheAdvice installed for DefaultClassLoaderService");
+                                    ClassLoaderReleaseAdvice.class.getName())
+                            .advice(ElementMatchers.named("getClassLoader")
+                                    .and(ElementMatchers.takesArgument(0, ElementMatchers.named("long"))),
+                                    ClassLoaderServiceGetAdvice.class.getName()));
+            log.info("ClassLoaderReleaseAdvice, ClassLoaderServiceGetAdvice & ClassLoaderServiceCacheAdvice "
+                    + "installed for DefaultClassLoaderService");
         } else {
             adviceStatus.put("DefaultClassLoaderService", "SKIPPED");
             log.warn("ClassLoaderReleaseAdvice SKIPPED — target fields missing, ClassLoader leak detection disabled");

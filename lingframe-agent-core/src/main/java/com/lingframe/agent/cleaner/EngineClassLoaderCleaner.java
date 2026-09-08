@@ -11,12 +11,17 @@ import java.lang.reflect.Method;
 import java.net.URLClassLoader;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
+import java.sql.Driver;
+import java.sql.DriverManager;
 import java.util.Collections;
+import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.ResourceBundle;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -74,6 +79,30 @@ public final class EngineClassLoaderCleaner {
     /** 累计清理数——写入日志供观测 Metaspace 治理是否生效 */
     private static final AtomicLong CLEANED_COUNT = new AtomicLong();
 
+    /** 登记跟踪每个作业所使用过的全部 ClassLoader 集合（作业终态物理卸载源头） */
+    private static final ConcurrentMap<Long, Set<ClassLoader>> JOB_CLASS_LOADERS = new ConcurrentHashMap<>();
+
+    /**
+     * 登记指定作业所加载/使用的 ClassLoader。
+     *
+     * @param jobId 作业标识
+     * @param classLoader 类加载器
+     */
+    public static void trackJobClassLoader(long jobId, ClassLoader classLoader) {
+        if (jobId <= 0 || classLoader == null || isSystemOrHostClassLoader(classLoader)) {
+            return;
+        }
+        Set<ClassLoader> set = JOB_CLASS_LOADERS.get(jobId);
+        if (set == null) {
+            set = Collections.newSetFromMap(new ConcurrentHashMap<ClassLoader, Boolean>());
+            final Set<ClassLoader> existing = JOB_CLASS_LOADERS.putIfAbsent(jobId, set);
+            if (existing != null) {
+                set = existing;
+            }
+        }
+        set.add(classLoader);
+    }
+
     private EngineClassLoaderCleaner() {
     }
 
@@ -121,6 +150,7 @@ public final class EngineClassLoaderCleaner {
         classLoaderService = null;
         coordinatorService = null;
         ORPHAN_DETECTED_TIME.clear();
+        JOB_CLASS_LOADERS.clear();
         CLEANED_COUNT.set(0);
     }
 
@@ -351,46 +381,56 @@ public final class EngineClassLoaderCleaner {
      * @param jobId 作业标识
      */
     public static void forceEvictJobClassLoaders(long jobId) {
-        final Object cls = classLoaderService;
-        if (cls == null || jobId <= 0) {
+        if (jobId <= 0) {
             return;
         }
-        try {
-            final Object cacheModeVal = readFieldValue(cls, FIELD_CACHE_MODE);
-            if (Boolean.TRUE.equals(cacheModeVal)) {
-                // 共享缓存模式下 ClassLoader 被多作业复用，不能按作业剥离
-                return;
-            }
-            final Object cacheVal = readFieldValue(cls, FIELD_CLASS_LOADER_CACHE);
-            final Object refCountVal = readFieldValue(cls, FIELD_REF_COUNT);
-            if (!(cacheVal instanceof Map)) {
-                return;
-            }
-            final Map<?, ?> cache = (Map<?, ?>) cacheVal;
-            final Object jobMapVal = cache.remove(jobId);
-            if (refCountVal instanceof Map) {
-                ((Map<?, ?>) refCountVal).remove(jobId);
-            }
-            if (jobMapVal instanceof Map) {
-                final Map<?, ?> jobMap = (Map<?, ?>) jobMapVal;
-                if (!jobMap.isEmpty()) {
-                    int evicted = 0;
-                    for (Object clObj : jobMap.values()) {
-                        if (clObj instanceof ClassLoader) {
-                            final ClassLoader cl = (ClassLoader) clObj;
-                            log.warn("Force evicted leaked ClassLoader [{}] for job {} due to asymmetric reference count",
-                                    cl.getClass().getName(), jobId);
-                            LingFrameAgentBridge.onPhysicalRelease(cl);
-                            evicted++;
+        final Set<ClassLoader> toRelease = new HashSet<>();
+        final Set<ClassLoader> tracked = JOB_CLASS_LOADERS.remove(jobId);
+        if (tracked != null) {
+            toRelease.addAll(tracked);
+        }
+
+        final Object cls = classLoaderService;
+        if (cls != null) {
+            try {
+                final Object cacheModeVal = readFieldValue(cls, FIELD_CACHE_MODE);
+                if (!Boolean.TRUE.equals(cacheModeVal)) {
+                    final Object cacheVal = readFieldValue(cls, FIELD_CLASS_LOADER_CACHE);
+                    final Object refCountVal = readFieldValue(cls, FIELD_REF_COUNT);
+                    if (cacheVal instanceof Map) {
+                        final Map<?, ?> cache = (Map<?, ?>) cacheVal;
+                        final Object jobMapVal = cache.remove(jobId);
+                        if (refCountVal instanceof Map) {
+                            ((Map<?, ?>) refCountVal).remove(jobId);
+                        }
+                        if (jobMapVal instanceof Map) {
+                            final Map<?, ?> jobMap = (Map<?, ?>) jobMapVal;
+                            for (Object clObj : jobMap.values()) {
+                                if (clObj instanceof ClassLoader) {
+                                    toRelease.add((ClassLoader) clObj);
+                                }
+                            }
                         }
                     }
-                    if (evicted > 0) {
-                        log.info("EngineClassLoaderCleaner evicted {} leaked ClassLoaders for job {}", evicted, jobId);
-                    }
+                }
+            } catch (Throwable t) {
+                log.warn("EngineClassLoaderCleaner cache extraction for job {} failed: {}", jobId, t.getMessage());
+            }
+        }
+
+        if (!toRelease.isEmpty()) {
+            int evicted = 0;
+            for (ClassLoader cl : toRelease) {
+                if (cl != null && !isSystemOrHostClassLoader(cl)) {
+                    log.info("Force evicted and physically releasing ClassLoader [{}] for job {}",
+                            cl.getClass().getName(), jobId);
+                    LingFrameAgentBridge.onPhysicalRelease(cl);
+                    evicted++;
                 }
             }
-        } catch (Throwable t) {
-            log.warn("EngineClassLoaderCleaner force evict for job {} failed: {}", jobId, t.getMessage());
+            if (evicted > 0) {
+                log.info("EngineClassLoaderCleaner evicted {} leaked ClassLoaders for job {}", evicted, jobId);
+            }
         }
     }
 
@@ -491,6 +531,28 @@ public final class EngineClassLoaderCleaner {
             }
         } catch (Throwable t) {
             log.debug("ProtoStuffSerializer cache clean skipped: {}", t.getMessage());
+        }
+
+        // 3. 注销 DriverManager 中属于目标 ClassLoader 的 JDBC 驱动
+        try {
+            final Enumeration<Driver> drivers = DriverManager.getDrivers();
+            while (drivers.hasMoreElements()) {
+                final Driver driver = drivers.nextElement();
+                if (driver.getClass().getClassLoader() == cl) {
+                    DriverManager.deregisterDriver(driver);
+                    log.info("Deregistered JDBC driver {} for ClassLoader {}",
+                            driver.getClass().getName(), cl.getClass().getName());
+                }
+            }
+        } catch (Throwable t) {
+            log.debug("DriverManager deregister failed: {}", t.getMessage());
+        }
+
+        // 4. 清理 ResourceBundle 缓存
+        try {
+            ResourceBundle.clearCache(cl);
+        } catch (Throwable t) {
+            log.debug("ResourceBundle clearCache failed: {}", t.getMessage());
         }
     }
 
