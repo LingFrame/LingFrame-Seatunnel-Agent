@@ -208,16 +208,6 @@ public final class EngineClassLoaderCleaner {
                 forceEvictJobClassLoaders(jobId);
             }
 
-            // 竞态治理：引擎在作业完成后会自行清理 finishedExecutionContexts 和 runningJobMasterMap，
-            // 导致上面从 finishedExecutionContexts 提取的 completedJobIds 可能为空，
-            // forceEvictJobClassLoaders 永远不被调用，JOB_CLASS_LOADERS 无限堆积。
-            // 这里从 executionContexts 提取活跃 jobId，对非活跃作业主动调用 forceEvictJobClassLoaders。
-            final Set<Long> activeJobIds = collectActiveJobIds(target);
-            for (Long trackedJobId : JOB_CLASS_LOADERS.keySet()) {
-                if (!activeJobIds.contains(trackedJobId)) {
-                    forceEvictJobClassLoaders(trackedJobId);
-                }
-            }
 
             // Fallback：如果 coordinatorService 未被 advice 捕获，通过 NodeEngine 主动获取
             tryCaptureCoordinatorService();
@@ -553,35 +543,7 @@ public final class EngineClassLoaderCleaner {
     }
 
     /**
-     * 从 TaskExecutionService 的 executionContexts 中提取所有活跃作业的 jobId。
-     * <p>
-     * 活跃作业指仍在执行中的作业，其 ClassLoader 不能被清理。
-     *
-     * @param tes TaskExecutionService 实例
-     * @return 活跃作业的 jobId 集合
-     */
-    private static Set<Long> collectActiveJobIds(Object tes) {
-        final Set<Long> activeJobIds = new HashSet<>();
-        try {
-            final Object execCtxValue = readFieldValue(tes, FIELD_EXECUTION_CONTEXTS);
-            if (execCtxValue instanceof Map) {
-                final Map<?, ?> execCtx = (Map<?, ?>) execCtxValue;
-                for (Object key : execCtx.keySet()) {
-                    if (key != null) {
-                        final long jid = extractJobId(key);
-                        if (jid > 0) {
-                            activeJobIds.add(jid);
-                        }
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            log.debug("Failed to collect active job ids: {}", t.getMessage());
-        }
-        return activeJobIds;
-    }
 
-    /**
      * 精准清理 TaskExecutionService 中属于指定作业的 executionContexts 和 finishedExecutionContexts。
      * <p>
      * 斩断 TaskGroupContext → taskGroup → tasks → Task → Action → Class → ClassLoader 引用链。
