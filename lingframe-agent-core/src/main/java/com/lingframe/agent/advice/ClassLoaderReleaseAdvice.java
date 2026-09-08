@@ -1,7 +1,6 @@
 package com.lingframe.agent.advice;
 
 import com.lingframe.agent.bridge.LingFrameAgentBridge;
-import com.lingframe.agent.cleaner.EngineClassLoaderCleaner;
 import net.bytebuddy.asm.Advice;
 
 import java.net.URL;
@@ -19,7 +18,7 @@ import java.util.Map;
  *   <li>onEnter：从 classLoaderCache 中精确提取目标 ClassLoader（考虑 cacheMode 下 jobId=1L 重定向）</li>
  *   <li>onExit：无论 cacheMode 为何值，均清理 ThreadLocal 槽位</li>
  *   <li>物理释放判定：仅 !cacheMode 时核验 Key 是否已从 cache 中物理剥离，
- *       cacheMode=true 时 ClassLoader 被多作业共享，绝不能物理关闭</li>
+ *       若已剥离则触发底座 {@code onPhysicalRelease} 契约统一收口治理</li>
  * </ol>
  */
 public final class ClassLoaderReleaseAdvice {
@@ -61,8 +60,6 @@ public final class ClassLoaderReleaseAdvice {
             final String key = LingFrameAgentBridge.convertJarsToKey(jars);
             final boolean isRemoved = (jobMap == null || !jobMap.containsKey(key));
             if (isRemoved) {
-                EngineClassLoaderCleaner.closeClassLoaderQuietly(targetLoader);
-                EngineClassLoaderCleaner.cleanStaticCaches(targetLoader);
                 LingFrameAgentBridge.onPhysicalRelease(targetLoader);
             }
         }

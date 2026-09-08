@@ -377,8 +377,6 @@ public final class EngineClassLoaderCleaner {
                             final ClassLoader cl = (ClassLoader) clObj;
                             log.warn("Force evicted leaked ClassLoader [{}] for job {} due to asymmetric reference count",
                                     cl.getClass().getName(), jobId);
-                            closeClassLoaderQuietly(cl);
-                            cleanStaticCaches(cl);
                             LingFrameAgentBridge.onPhysicalRelease(cl);
                             evicted++;
                         }
@@ -394,19 +392,68 @@ public final class EngineClassLoaderCleaner {
     }
 
     /**
-     * 安全显式关闭 URLClassLoader 释放底层 JAR 句柄与 ClassPath 映射。
+     * 安全显式关闭作业级自定义类加载器（释放底层的 JAR 句柄与 ClassPath 资源）。
+     * <p>
+     * 安全守卫机制（绝不走两极）：
+     * <ol>
+     *   <li>必须是 {@link URLClassLoader} 实例；</li>
+     *   <li>绝对不能是系统类加载器（SystemClassLoader/Platform/Ext）链上的加载器；</li>
+     *   <li>绝对不能是 Agent/宿主核心类加载器链上的加载器；</li>
+     *   <li>严格保护测试宿主（如 Surefire Forked VM / IDE 运行器）与引擎平台常驻基础组件，杜绝误杀；</li>
+     *   <li>出现任何异常均降级安全忽略，绝不破坏宿主或作业主链路。</li>
+     * </ol>
      *
-     * @param cl 类加载器
+     * @param cl 目标类加载器
      */
-    public static void closeClassLoaderQuietly(ClassLoader cl) {
-        if (cl instanceof URLClassLoader) {
-            try {
-                ((URLClassLoader) cl).close();
-                log.info("Explicitly closed URLClassLoader: {}", cl.getClass().getName());
-            } catch (Throwable t) {
-                log.warn("Failed to close URLClassLoader {}: {}", cl.getClass().getName(), t.getMessage());
-            }
+    public static void closeClassLoaderSafely(ClassLoader cl) {
+        if (!(cl instanceof URLClassLoader)) {
+            return;
         }
+        if (isSystemOrHostClassLoader(cl)) {
+            log.debug("Skipping close for system or host ClassLoader: {}", cl.getClass().getName());
+            return;
+        }
+        try {
+            ((URLClassLoader) cl).close();
+            log.info("Safely closed isolated job ClassLoader: {}", cl.getClass().getName());
+        } catch (Throwable t) {
+            log.warn("Failed to close isolated job ClassLoader {}: {}", cl.getClass().getName(), t.getMessage());
+        }
+    }
+
+    /**
+     * 判定目标类加载器是否属于系统或宿主 Agent 自身加载器链。
+     *
+     * @param cl 目标加载器
+     * @return true 属于系统/宿主链，严禁关闭；false 属于隔离的作业子加载器
+     */
+    public static boolean isSystemOrHostClassLoader(ClassLoader cl) {
+        if (cl == null) {
+            return true;
+        }
+        try {
+            ClassLoader sys = ClassLoader.getSystemClassLoader();
+            while (sys != null) {
+                if (cl == sys) {
+                    return true;
+                }
+                sys = sys.getParent();
+            }
+        } catch (Throwable t) {
+            log.debug("System ClassLoader hierarchy inspection failed: {}", t.getMessage());
+        }
+        try {
+            ClassLoader host = EngineClassLoaderCleaner.class.getClassLoader();
+            while (host != null) {
+                if (cl == host) {
+                    return true;
+                }
+                host = host.getParent();
+            }
+        } catch (Throwable t) {
+            log.debug("Host ClassLoader hierarchy inspection failed: {}", t.getMessage());
+        }
+        return false;
     }
 
     /**

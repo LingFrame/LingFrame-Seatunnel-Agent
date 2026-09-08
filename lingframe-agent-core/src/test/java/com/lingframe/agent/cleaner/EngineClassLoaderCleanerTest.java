@@ -6,6 +6,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.net.URL;
+import java.net.URLClassLoader;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -99,6 +100,10 @@ class EngineClassLoaderCleanerTest {
         }
     }
 
+    private static URLClassLoader createIsolatedTestClassLoader() {
+        return new URLClassLoader(new URL[0], null);
+    }
+
     @Test
     @DisplayName("验证 cleanFinished 物理移除 Map 条目并清空上下文内强引用")
     void testCleanFinishedPurgesAndClearsContext() throws Exception {
@@ -106,7 +111,7 @@ class EngineClassLoaderCleanerTest {
         final Object taskGroupObj = new Object();
         final MockTaskGroupLocation locKey = new MockTaskGroupLocation(999L);
         final URL dummyUrl = new URL("file:///dummy.jar");
-        final MockTaskGroupContext context = new MockTaskGroupContext(taskGroupObj, locKey, getClass().getClassLoader(), dummyUrl);
+        final MockTaskGroupContext context = new MockTaskGroupContext(taskGroupObj, locKey, createIsolatedTestClassLoader(), dummyUrl);
 
         mockService.getFinishedExecutionContexts().put(locKey, context);
         Assertions.assertEquals(1, mockService.getFinishedExecutionContexts().size());
@@ -136,7 +141,7 @@ class EngineClassLoaderCleanerTest {
         final MockClassLoaderService mockCls = new MockClassLoaderService();
         final long leakedJobId = 888L;
         final Map<String, ClassLoader> map = new HashMap<>();
-        map.put("key-1", getClass().getClassLoader());
+        map.put("key-1", createIsolatedTestClassLoader());
         mockCls.getClassLoaderCache().put(leakedJobId, map);
 
         final Map<String, AtomicInteger> refMap = new HashMap<>();
@@ -162,11 +167,11 @@ class EngineClassLoaderCleanerTest {
         final long orphanJobId = 102L;
 
         final Map<String, ClassLoader> activeMap = new HashMap<>();
-        activeMap.put("active-key", getClass().getClassLoader());
+        activeMap.put("active-key", createIsolatedTestClassLoader());
         mockCls.getClassLoaderCache().put(activeJobId, activeMap);
 
         final Map<String, ClassLoader> orphanMap = new HashMap<>();
-        orphanMap.put("orphan-key", getClass().getClassLoader());
+        orphanMap.put("orphan-key", createIsolatedTestClassLoader());
         mockCls.getClassLoaderCache().put(orphanJobId, orphanMap);
 
         // 注册到 Cleaner
@@ -262,11 +267,23 @@ class EngineClassLoaderCleanerTest {
     }
 
     @Test
-    @DisplayName("验证 closeClassLoaderQuietly 与 cleanStaticCaches null 安全且幂等")
+    @DisplayName("验证 closeClassLoaderSafely 与 cleanStaticCaches 安全守卫与幂等性")
     void testClassLoaderCloseAndCacheNullSafe() {
-        Assertions.assertDoesNotThrow(() -> EngineClassLoaderCleaner.closeClassLoaderQuietly(null));
+        // null 安全
+        Assertions.assertDoesNotThrow(() -> EngineClassLoaderCleaner.closeClassLoaderSafely(null));
         Assertions.assertDoesNotThrow(() -> EngineClassLoaderCleaner.cleanStaticCaches(null));
-        Assertions.assertDoesNotThrow(() -> EngineClassLoaderCleaner.cleanStaticCaches(getClass().getClassLoader()));
+
+        // 宿主与系统 ClassLoader 保护：绝对禁止执行 close 误杀环境
+        final ClassLoader hostLoader = getClass().getClassLoader();
+        Assertions.assertTrue(EngineClassLoaderCleaner.isSystemOrHostClassLoader(hostLoader));
+        Assertions.assertTrue(EngineClassLoaderCleaner.isSystemOrHostClassLoader(ClassLoader.getSystemClassLoader()));
+        Assertions.assertDoesNotThrow(() -> EngineClassLoaderCleaner.closeClassLoaderSafely(hostLoader));
+
+        // 隔离的子 URLClassLoader：安全关闭与缓存清理
+        final URLClassLoader isolated = createIsolatedTestClassLoader();
+        Assertions.assertFalse(EngineClassLoaderCleaner.isSystemOrHostClassLoader(isolated));
+        Assertions.assertDoesNotThrow(() -> EngineClassLoaderCleaner.closeClassLoaderSafely(isolated));
+        Assertions.assertDoesNotThrow(() -> EngineClassLoaderCleaner.cleanStaticCaches(isolated));
     }
 }
 
