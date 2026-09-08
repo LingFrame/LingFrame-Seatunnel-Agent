@@ -73,18 +73,18 @@ jobs:
           docker compose up -d
           echo "Waiting for SeaTunnel cluster (agent: 5801) to become ready..."
           READY_AGENT=false
-          # [对照组已注释] READY_NATIVE=false
+          READY_NATIVE=false
           for i in $(seq 1 36); do
             if [ "$READY_AGENT" != "true" ] && curl -s -f http://localhost:5801/hazelcast/health/ready >/dev/null; then
               echo "seatunnel-server (agent, port 5801) is READY (attempt $i)!"
               READY_AGENT=true
             fi
-            # [对照组已注释] if [ "$READY_NATIVE" != "true" ] && curl -s -f http://localhost:5802/hazelcast/health/ready >/dev/null; then
-            #   echo "seatunnel-native (control, port 5802) is READY (attempt $i)!"
-            #   READY_NATIVE=true
-            # fi
-            if [ "$READY_AGENT" = "true" ]; then
-              echo "SeaTunnel cluster (agent) is READY!"
+            if [ "$READY_NATIVE" != "true" ] && curl -s -f http://localhost:5802/hazelcast/health/ready >/dev/null; then
+              echo "seatunnel-native (control, port 5802) is READY (attempt $i)!"
+              READY_NATIVE=true
+            fi
+            if [ "$READY_AGENT" = "true" ] && [ "$READY_NATIVE" = "true" ]; then
+              echo "Both SeaTunnel clusters (agent + native) are READY!"
               break
             fi
             echo "Waiting for cluster... ($i/36)"
@@ -92,10 +92,10 @@ jobs:
           done
           echo "=== Docker Compose PS ==="
           docker compose ps -a
-          if [ "$READY_AGENT" != "true" ]; then
+          if [ "$READY_AGENT" != "true" ] || [ "$READY_NATIVE" != "true" ]; then
             echo "=== SeaTunnel Logs upon Crash ==="
             docker compose logs seatunnel-server
-            # [对照组已注释] docker compose logs seatunnel-native
+            docker compose logs seatunnel-native
             exit 1
           fi
           TEST_STATUS=0
@@ -104,9 +104,10 @@ jobs:
           cat target/logs/metaspace-audit.log 2>/dev/null || echo "No metaspace-audit.log found"
           echo "=== SeaTunnel Server Logs (always captured for cleaner/recycle audit) ==="
           docker compose logs seatunnel-server
+          docker compose logs seatunnel-native
           if [ $TEST_STATUS -ne 0 ]; then
             echo "=== SeaTunnel Server Logs upon Failure ==="
-            # [对照组已注释] docker compose logs seatunnel-native
+            docker compose logs seatunnel-native
             docker compose down -v
             exit $TEST_STATUS
           fi

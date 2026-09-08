@@ -77,32 +77,32 @@ services:
       timeout: 5s
       retries: 30
 
-  # [对照组已注释] seatunnel-native — 不挂载 Agent 的原生 SeaTunnel，当前阶段不再每次 CI 跑对照组
-  # seatunnel-native:
-  #   image: apache/seatunnel:2.3.13
-  #   container_name: seatunnel-native
-  #   depends_on:
-  #     - mysql-server
-  #     - kafka-server
-  #   ports:
-  #     - "5802:5801"
-  #   environment:
-  #     - SEATUNNEL_HOME=/opt/seatunnel
-  #     - "JAVA_TOOL_OPTIONS=-XX:+UnlockDiagnosticVMOptions"
-  #   volumes:
-  #     - ./src/test/resources/seatunnel.yaml:/opt/seatunnel/config/seatunnel.yaml
-  #     - ./docker/hazelcast-native.yaml:/opt/seatunnel/config/hazelcast.yaml
-  #     - ./src/test/resources/log4j2-test.xml:/opt/seatunnel/config/log4j2.xml
-  #     - ./src/test/resources/log4j2.properties:/opt/seatunnel/config/log4j2.properties
-  #     - ./target/connectors/seatunnel:/opt/seatunnel/connectors/seatunnel
-  #     - ./target/drivers/mysql-connector-java.jar:/opt/seatunnel/lib/mysql-connector-java.jar
-  #   command: >
-  #     sh -c "
-  #       export JAVA_OPTS=\"$${JAVA_OPTS} -XX:+UnlockDiagnosticVMOptions -Dlog4j2.configurationFile=/opt/seatunnel/config/log4j2.xml\";
-  #       /opt/seatunnel/bin/seatunnel-cluster.sh
-  #     "
-  #   healthcheck:
-  #     test: ["CMD", "curl", "-f", "http://localhost:5801/hazelcast/health/ready"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 30
+  # seatunnel-native — 不挂载 Agent 的原生 SeaTunnel，作为 A/B 对照组
+  seatunnel-native:
+    image: apache/seatunnel:2.3.13
+    container_name: seatunnel-native
+    depends_on:
+      - mysql-server
+      - kafka-server
+    ports:
+      - "5802:5801"
+    environment:
+      - SEATUNNEL_HOME=/opt/seatunnel
+      - "JAVA_TOOL_OPTIONS=-XX:+UnlockDiagnosticVMOptions"
+    volumes:
+      - ./src/test/resources/seatunnel.yaml:/opt/seatunnel/config/seatunnel.yaml
+      - ./docker/hazelcast-native.yaml:/opt/seatunnel/config/hazelcast.yaml
+      - ./src/test/resources/log4j2-test.xml:/opt/seatunnel/config/log4j2.xml
+      - ./src/test/resources/log4j2.properties:/opt/seatunnel/config/log4j2.properties
+      - ./target/connectors/seatunnel:/opt/seatunnel/connectors/seatunnel
+      - ./target/drivers/mysql-connector-java.jar:/opt/seatunnel/lib/mysql-connector-java.jar
+    command: >
+      sh -c "
+        export JAVA_OPTS=\"$${JAVA_OPTS} -XX:+UnlockDiagnosticVMOptions -Dlog4j2.configurationFile=/opt/seatunnel/config/log4j2.xml\";
+        /opt/seatunnel/bin/seatunnel-cluster.sh
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5801/hazelcast/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 30

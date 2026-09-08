@@ -110,35 +110,41 @@ class MetaspaceLeakIT {
                 "Docker daemon or '" + AGENT_CONTAINER_NAME + "' container is not available, skipping MetaspaceLeakIT");
 
         final List<String> matrixJobs = buildOrthogonalMatrixJobConfigs();
-        // [对照组已注释] 当前阶段不再每次 CI 跑对照组，只验证实验组独立 Metaspace 收敛
-        // final boolean isNativeRunning = isDockerContainerRunning(NATIVE_CONTAINER_NAME);
-        // assertThat(isNativeRunning)
-        //         .as("Native control container '%s' must be running for strict A/B audit", NATIVE_CONTAINER_NAME)
-        //         .isTrue();
+        final boolean isNativeRunning = isDockerContainerRunning(NATIVE_CONTAINER_NAME);
+        assertThat(isNativeRunning)
+                .as("Native control container '%s' must be running for strict A/B audit", NATIVE_CONTAINER_NAME)
+                .isTrue();
 
-        // [对照组已注释] log.info("Starting Control Group benchmark on native SeaTunnel (without agent)...");
-        // final MetaspaceAuditResult nativeResult =
-        //         runTestMatrixAndAudit("Native-Control", NATIVE_REST_URL, NATIVE_CONTAINER_NAME, matrixJobs);
+        log.info("Starting Control Group benchmark on native SeaTunnel (without agent)...");
+        final MetaspaceAuditResult nativeResult =
+                runTestMatrixAndAudit("Native-Control", NATIVE_REST_URL, NATIVE_CONTAINER_NAME, matrixJobs);
+
+        // 对照组跑完后清空 Kafka topics，确保实验组从干净状态开始（A/B 对比公平性）
+        resetKafkaTopics();
 
         log.info("Starting Treatment Group benchmark on SeaTunnel with LingFrame Agent...");
         final MetaspaceAuditResult agentResult =
                 runTestMatrixAndAudit("Agent-Treatment", AGENT_REST_URL, AGENT_CONTAINER_NAME, matrixJobs);
 
-        // [对照组已注释] final long netOverhead = agentResult.getNetGrowth() - nativeResult.getNetGrowth();
-        log.info("==================== [Metaspace Audit Report (Agent Only)] ====================");
-        log.info("Agent Baseline : {}", formatMb(agentResult.getBaseline()));
-        log.info("Agent Round 1  : {}", formatMb(agentResult.getRound1()));
-        log.info("Agent Round 2  : {}", formatMb(agentResult.getRound2()));
-        log.info("Agent Final    : {}", formatMb(agentResult.getFinalUsed()));
-        log.info("Agent Growth   : {}", formatMb(agentResult.getNetGrowth()));
-        log.info("Upper Growth Threshold: {}", formatMb(METASPACE_GROWTH_THRESHOLD_BYTES));
-        log.info("======================================================================");
+        final long netOverhead = agentResult.getNetGrowth() - nativeResult.getNetGrowth();
+        log.info("==================== [Metaspace Audit Report (A/B)] ====================");
+        log.info("Native Baseline : {}", formatMb(nativeResult.getBaseline()));
+        log.info("Native Final    : {}", formatMb(nativeResult.getFinalUsed()));
+        log.info("Native Growth   : {}", formatMb(nativeResult.getNetGrowth()));
+        log.info("Agent Baseline  : {}", formatMb(agentResult.getBaseline()));
+        log.info("Agent Round 1   : {}", formatMb(agentResult.getRound1()));
+        log.info("Agent Round 2   : {}", formatMb(agentResult.getRound2()));
+        log.info("Agent Final     : {}", formatMb(agentResult.getFinalUsed()));
+        log.info("Agent Growth    : {}", formatMb(agentResult.getNetGrowth()));
+        log.info("Net Overhead    : {}", formatMb(netOverhead));
+        log.info("Upper Growth Threshold  : {}", formatMb(METASPACE_GROWTH_THRESHOLD_BYTES));
+        log.info("Net Overhead Threshold  : {}", formatMb(MAX_NET_OVERHEAD_BYTES));
+        log.info("========================================================================");
 
-        // [对照组已注释] A/B 对比 netOverhead 断言
-        // assertThat(netOverhead)
-        //         .as("Agent net overhead should be <= %d bytes, actual: %d (nativeGrowth: %d, agentGrowth: %d)",
-        //                 MAX_NET_OVERHEAD_BYTES, netOverhead, nativeResult.getNetGrowth(), agentResult.getNetGrowth())
-        //         .isLessThanOrEqualTo(MAX_NET_OVERHEAD_BYTES);
+        assertThat(netOverhead)
+                .as("Agent net overhead should be <= %d bytes, actual: %d (nativeGrowth: %d, agentGrowth: %d)",
+                        MAX_NET_OVERHEAD_BYTES, netOverhead, nativeResult.getNetGrowth(), agentResult.getNetGrowth())
+                .isLessThanOrEqualTo(MAX_NET_OVERHEAD_BYTES);
 
         // 只要还有未回收的类（retained > 0），不管测试通过与否都抓 heap dump，供 MAT 分析定位残留 GC Root
         // 除非类全部回收（retained == 0），才跳过 dump
@@ -575,6 +581,39 @@ class MetaspaceLeakIT {
             return "CANCELED";
         }
         return null;
+    }
+
+    /**
+     * 删除 Kafka topics 以在对照组和实验组之间重置消息状态。
+     * <p>
+     * 两组共用同一个 Kafka 集群，对照组的 Kafka sink 作业会向 {@code test-topic-1} 生产消息。
+     * 若不清空，实验组的 Kafka source 作业从 earliest 消费会读到对照组残留消息，
+     * 导致处理双倍数据量，破坏 A/B 对比公平性。
+     * <p>
+     * 删除后依赖 {@code KAFKA_AUTO_CREATE_TOPICS_ENABLE=true} 自动重建。
+     */
+    private void resetKafkaTopics() throws IOException, InterruptedException {
+        log.info("Resetting Kafka topics between Control and Treatment groups...");
+        final String[] topics = {"test-topic-1", "test-topic-2"};
+        for (String topic : topics) {
+            final ProcessBuilder pb = new ProcessBuilder(
+                    "docker", "exec", "kafka-server",
+                    "/opt/kafka/bin/kafka-topics.sh",
+                    "--bootstrap-server", "localhost:9092",
+                    "--delete", "--topic", topic);
+            pb.redirectErrorStream(true);
+            final Process p = pb.start();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    log.info("[kafka-reset] {}", line);
+                }
+            }
+            p.waitFor(10, TimeUnit.SECONDS);
+        }
+        Thread.sleep(3000);
+        log.info("Kafka topics reset completed.");
     }
 
     private static String extractJsonField(String json, String fieldName) {
