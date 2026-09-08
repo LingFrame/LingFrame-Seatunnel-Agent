@@ -6,8 +6,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.ref.Reference;
+import java.lang.reflect.AccessibleObject;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.IdentityHashMap;
 import java.util.Map;
 
@@ -47,27 +50,27 @@ public final class EngineSafeThreadReferenceUnloadHook implements LingUnloadHook
         Field valueField = null;
         try {
             tlField = Thread.class.getDeclaredField("threadLocals");
-            tlField.setAccessible(true);
+            setAccessibleSafely(tlField);
         } catch (Throwable t) {
             log.debug("Thread.threadLocals not accessible: {}", t.getMessage());
         }
         try {
             itlField = Thread.class.getDeclaredField("inheritableThreadLocals");
-            itlField.setAccessible(true);
+            setAccessibleSafely(itlField);
         } catch (Throwable t) {
             log.debug("Thread.inheritableThreadLocals not accessible: {}", t.getMessage());
         }
         try {
             final Class<?> tlmClass = Class.forName("java.lang.ThreadLocal$ThreadLocalMap");
             tableField = tlmClass.getDeclaredField("table");
-            tableField.setAccessible(true);
+            setAccessibleSafely(tableField);
         } catch (Throwable t) {
             log.debug("ThreadLocalMap.table not accessible: {}", t.getMessage());
         }
         try {
             final Class<?> entryClass = Class.forName("java.lang.ThreadLocal$ThreadLocalMap$Entry");
             valueField = entryClass.getDeclaredField("value");
-            valueField.setAccessible(true);
+            setAccessibleSafely(valueField);
         } catch (Throwable t) {
             log.debug("ThreadLocalMap$Entry.value not accessible: {}", t.getMessage());
         }
@@ -75,6 +78,14 @@ public final class EngineSafeThreadReferenceUnloadHook implements LingUnloadHook
         INHERITABLE_THREAD_LOCALS_FIELD = itlField;
         TLM_TABLE_FIELD = tableField;
         TLM_ENTRY_VALUE_FIELD = valueField;
+    }
+
+    /** 安全地在 doPrivileged 块中放宽反射对象的访问权限。 */
+    private static void setAccessibleSafely(final AccessibleObject accessibleObject) {
+        AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
+            accessibleObject.setAccessible(true);
+            return null;
+        });
     }
 
     private final ThreadReferenceUnloadHook delegate;
