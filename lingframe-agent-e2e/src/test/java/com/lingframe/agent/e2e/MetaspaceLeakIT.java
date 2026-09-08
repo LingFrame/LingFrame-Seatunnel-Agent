@@ -139,7 +139,8 @@ class MetaspaceLeakIT {
             try {
                 final String pid = resolveJavaPid(AGENT_CONTAINER_NAME);
                 final String dumpPath = "/tmp/heapdump-" + System.currentTimeMillis() + ".hprof";
-                log.info("[Agent-Treatment] Metaspace leak detected, generating heap dump at {} in container {}", dumpPath, AGENT_CONTAINER_NAME);
+                log.info("[Agent-Treatment] Metaspace leak detected, generating heap dump at {} in container {}",
+                        dumpPath, AGENT_CONTAINER_NAME);
                 final ProcessBuilder dumpPb = new ProcessBuilder(
                         "docker", "exec", AGENT_CONTAINER_NAME,
                         "jcmd", pid, "GC.heap_dump", dumpPath);
