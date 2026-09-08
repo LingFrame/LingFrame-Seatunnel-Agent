@@ -358,46 +358,55 @@ class MetaspaceLeakIT {
     private static final Pattern HEAP_INFO_METASPACE_PATTERN =
             Pattern.compile("Metaspace\\s+used\\s+(\\d+)\\s*K", Pattern.CASE_INSENSITIVE);
 
-    /** jcmd GC.class_stats 加载类数（首段稳定汇总文案） */
-    private static final Pattern GC_CLASS_STATS_LOADED =
-            Pattern.compile("Number of classes loaded\\s*:\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
-
-    /** jcmd GC.class_stats 卸载类数（不同 JDK 轻微文案差异，兼容两种写法） */
-    private static final Pattern GC_CLASS_STATS_UNLOADED =
-            Pattern.compile("Number of\\s+(?:classes\\s+)?unloaded\\s*:\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
+    private static int indexOf(String[] arr, String key) {
+        for (int i = 0; i < arr.length; i++) {
+            if (arr[i].equalsIgnoreCase(key)) {
+                return i;
+            }
+        }
+        return -1;
+    }
 
     /**
-     * 执行 jcmd GC.class_stats 采集类加载/卸载计数 {@code [loaded, unloaded]}。
+     * 执行 {@code jstat -class} 采集类加载/卸载计数 {@code [loaded, unloaded]}。
      * <p>
-     * 注意：与 GC.class_histogram（堆对象）不同，class_stats 统计的是类元数据，
-     * 正是 Metaspace 的增长维度。失败时返回 {@code new long[] {-1L, -1L}} 不影响主审计。
+     * 与 jcmd GC.class_stats 不同：后者依赖 -XX:+UnlockDiagnosticVMOptions，而该参数
+     * 通过 JAVA_OPTS 注入会被 SeaTunnel 启动脚本重建的 JAVA_OPTS 覆盖、无法生效；
+     * {@code jstat -class} 无需任何诊断参数，容器内 JDK 自带、稳定可用，直接给出
+     * Loaded/Unloaded 两列。失败时返回 {@code new long[] {-1L, -1L}} 不影响主审计。
      */
     private long[] captureClassCounts(String containerName) {
         try {
             final String pid = resolveJavaPid(containerName);
             final ProcessBuilder pb = new ProcessBuilder(
-                    "docker", "exec", containerName, "jcmd", pid, "GC.class_stats");
+                    "docker", "exec", containerName, "jstat", "-class", pid);
             pb.redirectErrorStream(true);
             final Process p = pb.start();
-            final StringBuilder output = new StringBuilder();
+            final List<String> lines = new ArrayList<>();
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    output.append(line).append('\n');
+                    lines.add(line.trim());
                 }
             }
             p.waitFor(15, TimeUnit.SECONDS);
-            final Matcher lm = GC_CLASS_STATS_LOADED.matcher(output);
-            final Matcher um = GC_CLASS_STATS_UNLOADED.matcher(output);
-            if (lm.find() && um.find()) {
-                return new long[]{Long.parseLong(lm.group(1)), Long.parseLong(um.group(1))};
+            // jstat -class 输出两行（表头 + 数值），按表头映射 Loaded/Unloaded 列，避免列序依赖
+            if (lines.size() >= 2) {
+                final String[] headers = lines.get(0).split("\\s+");
+                final String[] values = lines.get(1).split("\\s+");
+                final int loadedIdx = indexOf(headers, "Loaded");
+                final int unloadedIdx = indexOf(headers, "Unloaded");
+                if (loadedIdx >= 0 && unloadedIdx >= 0
+                        && loadedIdx < values.length && unloadedIdx < values.length) {
+                    return new long[]{Long.parseLong(values[loadedIdx]), Long.parseLong(values[unloadedIdx])};
+                }
             }
-            log.warn("GC.class_stats summary not found (diagnostic options not enabled?); raw head: {}",
-                    output.length() > 200 ? output.substring(0, 200) : output);
+            log.warn("jstat -class summary not found in container {}; raw head: {}",
+                    containerName, lines.isEmpty() ? "" : lines.get(0));
             return new long[]{-1L, -1L};
         } catch (Exception e) {
-            log.warn("GC.class_stats capture failed in container {}: {}", containerName, e.getMessage());
+            log.warn("jstat -class capture failed in container {}: {}", containerName, e.getMessage());
             return new long[]{-1L, -1L};
         }
     }
@@ -412,7 +421,7 @@ class MetaspaceLeakIT {
         log.info("[{}] ========== Class Load / Unload Growth (Metaspace root cause) ==========",
                 targetLabel);
         if (baseline[0] < 0 || finalSample[0] < 0) {
-            log.info("[{}]   (class stats unavailable — ensure -XX:+UnlockDiagnosticVMOptions is set)",
+            log.info("[{}]   (class load/unload counts unavailable via jstat -class)",
                     targetLabel);
             log.info("[{}] ===========================================================", targetLabel);
             return;
