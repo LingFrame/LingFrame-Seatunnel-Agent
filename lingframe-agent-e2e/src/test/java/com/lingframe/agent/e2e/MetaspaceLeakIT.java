@@ -134,6 +134,45 @@ class MetaspaceLeakIT {
         //                 MAX_NET_OVERHEAD_BYTES, netOverhead, nativeResult.getNetGrowth(), agentResult.getNetGrowth())
         //         .isLessThanOrEqualTo(MAX_NET_OVERHEAD_BYTES);
 
+        // Metaspace 超标时自动抓取 heap dump，供 MAT 分析定位残留 GC Root
+        if (agentResult.getNetGrowth() >= METASPACE_GROWTH_THRESHOLD_BYTES) {
+            try {
+                final String pid = resolveJavaPid(AGENT_CONTAINER_NAME);
+                final String dumpPath = "/tmp/heapdump-" + System.currentTimeMillis() + ".hprof";
+                log.info("[Agent-Treatment] Metaspace leak detected, generating heap dump at {} in container {}", dumpPath, AGENT_CONTAINER_NAME);
+                final ProcessBuilder dumpPb = new ProcessBuilder(
+                        "docker", "exec", AGENT_CONTAINER_NAME,
+                        "jcmd", pid, "GC.heap_dump", dumpPath);
+                dumpPb.redirectErrorStream(true);
+                final Process dumpP = dumpPb.start();
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(dumpP.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        log.info("[heap_dump] {}", line);
+                    }
+                }
+                dumpP.waitFor(60, TimeUnit.SECONDS);
+                final String localDumpPath = "target/logs/heapdump-" + System.currentTimeMillis() + ".hprof";
+                new java.io.File("target/logs").mkdirs();
+                final ProcessBuilder cpPb = new ProcessBuilder(
+                        "docker", "cp", AGENT_CONTAINER_NAME + ":" + dumpPath, localDumpPath);
+                cpPb.redirectErrorStream(true);
+                final Process cpP = cpPb.start();
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(cpP.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        log.info("[docker cp] {}", line);
+                    }
+                }
+                cpP.waitFor(60, TimeUnit.SECONDS);
+                log.info("[Agent-Treatment] Heap dump saved to {}", localDumpPath);
+            } catch (Exception e) {
+                log.warn("[Agent-Treatment] Failed to generate heap dump: {}", e.getMessage());
+            }
+        }
+
         assertThat(agentResult.getNetGrowth())
                 .as("Agent Metaspace growth should be < %d bytes, actual: %d (baseline: %d, final: %d)",
                         METASPACE_GROWTH_THRESHOLD_BYTES, agentResult.getNetGrowth(),
