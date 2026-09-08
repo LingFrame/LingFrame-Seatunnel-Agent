@@ -209,10 +209,13 @@ class MetaspaceLeakIT {
         // 2. 阶段一：执行 3×3 全正交 9 组作业矩阵（每组执行 2 轮）
         long round1Used = 0L;
         long round2Used = 0L;
+        final List<String> allJobIds = new ArrayList<>();
         for (int round = 1; round <= 2; round++) {
             for (int i = 0; i < matrixJobs.size(); i++) {
                 final String jobConfig = matrixJobs.get(i);
-                submitJob(restUrl, targetLabel + "-r" + round + "-j" + (i + 1), jobConfig);
+                final String jobTag = targetLabel + "-r" + round + "-j" + (i + 1);
+                final String jobId = submitJob(restUrl, jobTag, jobConfig);
+                allJobIds.add(jobId);
                 Thread.sleep(1000);
             }
             forceFullGcInContainer(containerName);
@@ -229,29 +232,40 @@ class MetaspaceLeakIT {
         // 3. 阶段二：多 Job 异构并发压测（4 线程并发交错提交不同异构作业）
         final ExecutorService executor = Executors.newFixedThreadPool(4);
         try {
-            final List<CompletableFuture<Void>> futures = new ArrayList<>();
+            final List<CompletableFuture<String>> futures = new ArrayList<>();
             final int concurrentRounds = 3;
             for (int r = 0; r < concurrentRounds; r++) {
                 final int roundIndex = r;
                 for (int j = 0; j < matrixJobs.size(); j++) {
                     final int jobIndex = j;
                     final String jobConfig = matrixJobs.get(j);
-                    futures.add(CompletableFuture.runAsync(() -> {
+                    futures.add(CompletableFuture.supplyAsync(() -> {
                         try {
-                            submitJob(restUrl, targetLabel + "-c-r" + roundIndex + "-j" + jobIndex, jobConfig);
+                            final String tag = targetLabel + "-c-r" + roundIndex + "-j" + jobIndex;
+                            return submitJob(restUrl, tag, jobConfig);
                         } catch (Exception e) {
                             throw new RuntimeException("Concurrent job failed", e);
                         }
                     }, executor));
                 }
             }
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(120, TimeUnit.SECONDS);
+            for (CompletableFuture<String> f : futures) {
+                allJobIds.add(f.get(120, TimeUnit.SECONDS));
+            }
         } finally {
             executor.shutdown();
             executor.awaitTermination(10, TimeUnit.SECONDS);
         }
 
-        // 4. 等待引擎将所有异步作业生命周期完成与释放
+        // 4. 验证所有作业正常 FINISHED（排除崩溃假象——作业提交成功 HTTP 200 不等于执行完成）
+        log.info("[{}] Verifying {} submitted jobs reached FINISHED state...", targetLabel, allJobIds.size());
+        for (int i = 0; i < allJobIds.size(); i++) {
+            final String jobId = allJobIds.get(i);
+            waitForJobFinished(restUrl, jobId, targetLabel + "-job-" + (i + 1), 60);
+        }
+        log.info("[{}] All {} jobs confirmed FINISHED.", targetLabel, allJobIds.size());
+
+        // 5. 等待引擎将所有异步作业生命周期完成与释放
         // Kafka source 作业消费全量消息可能需要较长时间，30 秒确保所有作业完成
         Thread.sleep(30000);
 
@@ -368,12 +382,11 @@ class MetaspaceLeakIT {
     private static final int MAX_SUBMIT_RETRIES = 3;
     private static final long RETRY_DELAY_MS = 2000L;
 
-    private void submitJob(String restUrl, String jobTag, String jobConfig) throws IOException {
+    private String submitJob(String restUrl, String jobTag, String jobConfig) throws IOException {
         IOException lastException = null;
         for (int attempt = 1; attempt <= MAX_SUBMIT_RETRIES; attempt++) {
             try {
-                submitJobOnce(restUrl, jobTag, jobConfig);
-                return;
+                return submitJobOnce(restUrl, jobTag, jobConfig);
             } catch (IOException e) {
                 lastException = e;
                 log.warn("[{}] Job submission attempt {}/{} failed: {}", jobTag, attempt, MAX_SUBMIT_RETRIES, e.getMessage());
@@ -390,7 +403,7 @@ class MetaspaceLeakIT {
         throw lastException;
     }
 
-    private void submitJobOnce(String restUrl, String jobTag, String jobConfig) throws IOException {
+    private String submitJobOnce(String restUrl, String jobTag, String jobConfig) throws IOException {
         final HttpURLConnection conn = (HttpURLConnection) new URL(restUrl).openConnection();
         try {
             conn.setRequestMethod("POST");
@@ -418,9 +431,94 @@ class MetaspaceLeakIT {
                 throw new IOException("SeaTunnel job submission failed (" + jobTag + "): HTTP "
                         + responseCode + " - " + err.toString().trim());
             }
+            final String responseBody;
+            try (InputStream is = conn.getInputStream()) {
+                responseBody = readAll(is);
+            }
+            final String jobId = extractJsonField(responseBody, "jobId");
+            if (jobId == null || jobId.isEmpty()) {
+                throw new IOException("SeaTunnel job submission failed (" + jobTag
+                        + "): no jobId in response: " + responseBody);
+            }
+            return jobId;
         } finally {
             conn.disconnect();
         }
+    }
+
+    /**
+     * 轮询 SeaTunnel REST API 直到作业到达终态（FINISHED / FAILED / CANCELED）或超时。
+     * <p>
+     * 排除"提交成功但执行崩溃"的假象：HTTP 200 只证明作业被引擎接收，
+     * 不证明作业正常执行完成。此方法通过 {@code GET /job-info/{jobId}} 确认终态。
+     *
+     * @param submitUrl     提交作业用的 REST URL（含 /submit-job 后缀）
+     * @param jobId         作业 ID
+     * @param jobTag        日志标签
+     * @param timeoutSeconds 单作业等待超时（秒）
+     */
+    private void waitForJobFinished(String submitUrl, String jobId, String jobTag, int timeoutSeconds)
+            throws IOException {
+        final String jobInfoUrl = submitUrl.replace("submit-job", "job-info") + "/" + jobId;
+        final long deadline = System.currentTimeMillis() + timeoutSeconds * 1000L;
+        String lastStatus = "UNKNOWN";
+        while (System.currentTimeMillis() < deadline) {
+            final HttpURLConnection conn = (HttpURLConnection) new URL(jobInfoUrl).openConnection();
+            try {
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(10000);
+                final int responseCode = conn.getResponseCode();
+                if (responseCode == 200) {
+                    final String body;
+                    try (InputStream is = conn.getInputStream()) {
+                        body = readAll(is);
+                    }
+                    final String jobStatus = extractJsonField(body, "jobStatus");
+                    if (jobStatus != null) {
+                        lastStatus = jobStatus;
+                        if ("FINISHED".equals(jobStatus)) {
+                            log.info("[{}] Job {} -> FINISHED", jobTag, jobId);
+                            return;
+                        }
+                        if ("FAILED".equals(jobStatus) || "CANCELED".equals(jobStatus)) {
+                            throw new IOException("Job " + jobTag + " (id=" + jobId
+                                    + ") ended with status " + jobStatus + ", body: " + body);
+                        }
+                    }
+                }
+            } finally {
+                conn.disconnect();
+            }
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while waiting for job " + jobTag, e);
+            }
+        }
+        throw new IOException("Job " + jobTag + " (id=" + jobId + ") did not finish within "
+                + timeoutSeconds + " seconds, last status: " + lastStatus);
+    }
+
+    private static String extractJsonField(String json, String fieldName) {
+        final Pattern p = Pattern.compile("\"" + fieldName + "\"\\s*:\\s*\"([^\"]+)\"");
+        final Matcher m = p.matcher(json);
+        if (m.find()) {
+            return m.group(1);
+        }
+        return null;
+    }
+
+    private static String readAll(InputStream is) throws IOException {
+        final StringBuilder sb = new StringBuilder();
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            String l;
+            while ((l = r.readLine()) != null) {
+                sb.append(l);
+            }
+        }
+        return sb.toString();
     }
 
     private static final Pattern HEAP_INFO_METASPACE_PATTERN =
