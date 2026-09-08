@@ -58,14 +58,14 @@ public final class EngineSafeThreadReferenceUnloadHook implements LingUnloadHook
             log.debug("Thread.inheritableThreadLocals not accessible: {}", t.getMessage());
         }
         try {
-            Class<?> tlmClass = Class.forName("java.lang.ThreadLocal$ThreadLocalMap");
+            final Class<?> tlmClass = Class.forName("java.lang.ThreadLocal$ThreadLocalMap");
             tableField = tlmClass.getDeclaredField("table");
             tableField.setAccessible(true);
         } catch (Throwable t) {
             log.debug("ThreadLocalMap.table not accessible: {}", t.getMessage());
         }
         try {
-            Class<?> entryClass = Class.forName("java.lang.ThreadLocal$ThreadLocalMap$Entry");
+            final Class<?> entryClass = Class.forName("java.lang.ThreadLocal$ThreadLocalMap$Entry");
             valueField = entryClass.getDeclaredField("value");
             valueField.setAccessible(true);
         } catch (Throwable t) {
@@ -174,11 +174,11 @@ public final class EngineSafeThreadReferenceUnloadHook implements LingUnloadHook
         }
         int count = 0;
         try {
-            Object map = mapField.get(t);
+            final Object map = mapField.get(t);
             if (map == null) {
                 return 0;
             }
-            Object[] table = (Object[]) TLM_TABLE_FIELD.get(map);
+            final Object[] table = (Object[]) TLM_TABLE_FIELD.get(map);
             if (table == null) {
                 return 0;
             }
@@ -186,9 +186,9 @@ public final class EngineSafeThreadReferenceUnloadHook implements LingUnloadHook
                 if (entry == null) {
                     continue;
                 }
-                Reference<?> ref = (Reference<?>) entry;
-                Object key = ref.get();
-                Object val = TLM_ENTRY_VALUE_FIELD.get(entry);
+                final Reference<?> ref = (Reference<?>) entry;
+                final Object key = ref.get();
+                final Object val = TLM_ENTRY_VALUE_FIELD.get(entry);
 
                 if (isClassLoaderRelated(key, cl, 2, new IdentityHashMap<>())
                         || isClassLoaderRelated(val, cl, 2, new IdentityHashMap<>())) {
@@ -197,7 +197,8 @@ public final class EngineSafeThreadReferenceUnloadHook implements LingUnloadHook
                     count++;
                 }
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable t2) {
+            log.debug("ThreadLocal map clean failed: {}", t2.getMessage());
         }
         return count;
     }
@@ -224,7 +225,7 @@ public final class EngineSafeThreadReferenceUnloadHook implements LingUnloadHook
         }
 
         if (obj instanceof Reference) {
-            Object referent = ((Reference<?>) obj).get();
+            final Object referent = ((Reference<?>) obj).get();
             if (referent != null && isClassLoaderRelated(referent, cl, depth - 1, visited)) {
                 return true;
             }
@@ -236,7 +237,8 @@ public final class EngineSafeThreadReferenceUnloadHook implements LingUnloadHook
                         return true;
                     }
                 }
-            } catch (Throwable ignored) {
+            } catch (Throwable t) {
+                log.debug("Iterable traversal in isClassLoaderRelated failed: {}", t.getMessage());
             }
         }
         if (obj instanceof Map) {
@@ -247,18 +249,20 @@ public final class EngineSafeThreadReferenceUnloadHook implements LingUnloadHook
                         return true;
                     }
                 }
-            } catch (Throwable ignored) {
+            } catch (Throwable t) {
+                log.debug("Map traversal in isClassLoaderRelated failed: {}", t.getMessage());
             }
         }
         if (obj.getClass().isArray() && !obj.getClass().getComponentType().isPrimitive()) {
             try {
-                int len = Array.getLength(obj);
+                final int len = Array.getLength(obj);
                 for (int i = 0; i < len; i++) {
                     if (isClassLoaderRelated(Array.get(obj, i), cl, depth - 1, visited)) {
                         return true;
                     }
                 }
-            } catch (Throwable ignored) {
+            } catch (Throwable t) {
+                log.debug("Array traversal in isClassLoaderRelated failed: {}", t.getMessage());
             }
         }
         return false;

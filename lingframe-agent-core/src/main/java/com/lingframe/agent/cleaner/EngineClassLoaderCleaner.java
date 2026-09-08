@@ -317,8 +317,8 @@ public final class EngineClassLoaderCleaner {
                                 final IMap<?, ?> map = (IMap<?, ?>) obj;
                                 map.remove(boxedJobId);
                                 map.remove(strJobId);
-                            } catch (Throwable ignored) {
-                                // 分布式操作降级忽略
+                            } catch (Throwable t2) {
+                                log.debug("Hazelcast distributed map eviction skipped for job {}: {}", jobId, t2.getMessage());
                             }
                         }
                     }
