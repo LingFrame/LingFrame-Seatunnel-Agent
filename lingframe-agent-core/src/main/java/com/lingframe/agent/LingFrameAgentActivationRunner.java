@@ -381,10 +381,11 @@ public final class LingFrameAgentActivationRunner {
                 .type(ElementMatchers.named(JOB_MASTER_TYPE))
                 .transform(new AgentBuilder.Transformer.ForAdvice()
                         .include(JobMasterCleanJobAdvice.class.getClassLoader())
-                        .advice(ElementMatchers.named("cleanJob"),
+                        .advice(ElementMatchers.named("cleanJob")
+                                        .or(ElementMatchers.named("run")),
                                 JobMasterCleanJobAdvice.class.getName()));
         adviceStatus.put("JobMaster", "INSTALLED");
-        log.info("JobMasterCleanJobAdvice installed for cleanJob interception (Coordinator ClassLoader evict)");
+        log.info("JobMasterCleanJobAdvice installed for cleanJob & run interception (Coordinator ClassLoader evict)");
 
         builder = installTcclGuardAdvice(builder, adviceStatus);
         builder.installOn(inst);

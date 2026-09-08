@@ -1,6 +1,7 @@
 package com.lingframe.agent.cleaner;
 
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -17,6 +18,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 @DisplayName("EngineClassLoaderCleaner 引擎类加载器清理治理测试")
 class EngineClassLoaderCleanerTest {
+
+    @BeforeEach
+    void setUp() {
+        EngineClassLoaderCleaner.resetForTesting();
+    }
 
     /**
      * 模拟 SeaTunnel TaskGroupLocation。
@@ -65,9 +71,14 @@ class EngineClassLoaderCleanerTest {
      */
     static class MockTaskExecutionService {
         private final ConcurrentHashMap<Object, Object> finishedExecutionContexts = new ConcurrentHashMap<>();
+        private final ConcurrentHashMap<Object, Object> executionContexts = new ConcurrentHashMap<>();
 
         public ConcurrentHashMap<Object, Object> getFinishedExecutionContexts() {
             return finishedExecutionContexts;
+        }
+
+        public ConcurrentHashMap<Object, Object> getExecutionContexts() {
+            return executionContexts;
         }
     }
 
@@ -141,5 +152,31 @@ class EngineClassLoaderCleanerTest {
         // 核心断言：残留的作业缓存被彻底移出
         Assertions.assertFalse(mockCls.getClassLoaderCache().containsKey(leakedJobId));
         Assertions.assertFalse(mockCls.getClassLoaderReferenceCount().containsKey(leakedJobId));
+    }
+
+    @Test
+    @DisplayName("验证 sweepOrphanClassLoaders 精准驱逐无活跃任务的孤儿作业并保留活跃作业")
+    void testSweepOrphanClassLoadersEvictsOnlyInactiveJobs() {
+        final MockClassLoaderService mockCls = new MockClassLoaderService();
+        final long activeJobId = 101L;
+        final long orphanJobId = 102L;
+
+        final Map<String, ClassLoader> activeMap = new HashMap<>();
+        activeMap.put("active-key", getClass().getClassLoader());
+        mockCls.getClassLoaderCache().put(activeJobId, activeMap);
+
+        final Map<String, ClassLoader> orphanMap = new HashMap<>();
+        orphanMap.put("orphan-key", getClass().getClassLoader());
+        mockCls.getClassLoaderCache().put(orphanJobId, orphanMap);
+
+        // 注册到 Cleaner
+        EngineClassLoaderCleaner.registerClassLoaderService(mockCls);
+
+        // 执行全局主动 Sweep，传入当前活跃作业集合，maxStaleMs 设为 0 立即生效
+        EngineClassLoaderCleaner.sweepOrphanClassLoaders(Collections.singleton(activeJobId), 0L);
+
+        // 核心断言：活跃作业不受影响，孤儿作业被剔除
+        Assertions.assertTrue(mockCls.getClassLoaderCache().containsKey(activeJobId));
+        Assertions.assertFalse(mockCls.getClassLoaderCache().containsKey(orphanJobId));
     }
 }

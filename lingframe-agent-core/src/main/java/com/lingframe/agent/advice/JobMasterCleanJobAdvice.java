@@ -19,7 +19,7 @@ public final class JobMasterCleanJobAdvice {
 
     private static final Logger log = LoggerFactory.getLogger(JobMasterCleanJobAdvice.class);
 
-    @Advice.OnMethodExit
+    @Advice.OnMethodExit(onThrowable = Throwable.class)
     public static void onExit(@Advice.This Object jobMaster) {
         if (jobMaster == null) {
             return;

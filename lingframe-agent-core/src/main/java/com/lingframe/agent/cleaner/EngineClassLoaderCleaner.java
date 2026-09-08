@@ -5,10 +5,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Field;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -24,6 +26,9 @@ import java.util.concurrent.atomic.AtomicLong;
  *       单例实例。针对因异常中断导致引用计数未对称归零而滞留在 {@code classLoaderCache} 中的
  *       {@code SeaTunnelChildFirstClassLoader}，在作业终态与上下文清理时强制剥离（{@code remove(jobId)}），
  *       并主动投递给 {@link LingFrameAgentBridge#onPhysicalRelease(ClassLoader)} 执行底座卸载钩子。</li>
+ *   <li><b>主动全量 Sweep 巡检</b>：定时比对当前 Worker 运行态中的 {@code executionContexts} 活跃作业 ID，
+ *       若在 {@code classLoaderCache} 中发现已无任何活跃任务的孤儿作业 ClassLoader，经防抖确认后主动彻底排空，
+ *       根除因 DAG 解析异常或失败未进 finished 队列引发的隐蔽类加载器堆积。</li>
  * </ul>
  * 全程反射保护、全枚举字段名均按引擎源码校准，任一阶段失败都降级跳过并告警，绝不破坏引擎主流程。
  */
@@ -33,6 +38,7 @@ public final class EngineClassLoaderCleaner {
 
     /** 引擎字段名（与 SeaTunnel 2.3.13 源码对齐） */
     private static final String FIELD_FINISHED = "finishedExecutionContexts";
+    private static final String FIELD_EXECUTION_CONTEXTS = "executionContexts";
     private static final String FIELD_CLASS_LOADERS = "classLoaders";
     private static final String FIELD_JARS = "jars";
     private static final String FIELD_TASK_GROUP = "taskGroup";
@@ -40,6 +46,10 @@ public final class EngineClassLoaderCleaner {
     private static final String FIELD_CLASS_LOADER_CACHE = "classLoaderCache";
     private static final String FIELD_REF_COUNT = "classLoaderReferenceCount";
     private static final String FIELD_JOB_ID = "jobId";
+
+    /** 孤儿 ClassLoader 首次探测时间戳（防启动期微秒级误判） */
+    private static final Map<Long, Long> ORPHAN_DETECTED_TIME = new ConcurrentHashMap<>();
+    private static final long ORPHAN_STALE_MS = 1000L;
 
     /** 引擎 TaskExecutionService 实例（由 advice 捕获，Worker 单例） */
     private static volatile Object taskExecutionService;
@@ -78,6 +88,16 @@ public final class EngineClassLoaderCleaner {
     }
 
     /**
+     * 重置缓存实例与内部探测状态（仅供单元测试隔离使用）。
+     */
+    static void resetForTesting() {
+        taskExecutionService = null;
+        classLoaderService = null;
+        ORPHAN_DETECTED_TIME.clear();
+        CLEANED_COUNT.set(0);
+    }
+
+    /**
      * 清空并移除引擎已完成作业上下文中的 ClassLoader / jars / taskGroup 强引用。
      * <p>
      * 幂等：直接从 {@code finishedExecutionContexts} 中移除已完成条目，断绝引擎内部堆积；
@@ -86,48 +106,135 @@ public final class EngineClassLoaderCleaner {
     public static void cleanFinished() {
         final Object target = taskExecutionService;
         if (target == null) {
+            sweepOrphanClassLoaders(Collections.emptySet());
             return;
         }
         try {
             final Object value = readFieldValue(target, FIELD_FINISHED);
-            if (!(value instanceof Map)) {
-                return;
-            }
-            final Map<?, ?> finished = (Map<?, ?>) value;
-            if (finished.isEmpty()) {
-                return;
-            }
-            int cleaned = 0;
             final Set<Long> completedJobIds = new HashSet<>();
-            final Iterator<? extends Map.Entry<?, ?>> iterator = finished.entrySet().iterator();
-            while (iterator.hasNext()) {
-                final Map.Entry<?, ?> entry = iterator.next();
-                final Object key = entry.getKey();
-                if (key != null) {
-                    final long jobId = extractJobId(key);
-                    if (jobId > 0) {
-                        completedJobIds.add(jobId);
+            if (value instanceof Map) {
+                final Map<?, ?> finished = (Map<?, ?>) value;
+                if (!finished.isEmpty()) {
+                    int cleaned = 0;
+                    final Iterator<? extends Map.Entry<?, ?>> iterator = finished.entrySet().iterator();
+                    while (iterator.hasNext()) {
+                        final Map.Entry<?, ?> entry = iterator.next();
+                        final Object key = entry.getKey();
+                        if (key != null) {
+                            final long jobId = extractJobId(key);
+                            if (jobId > 0) {
+                                completedJobIds.add(jobId);
+                            }
+                        }
+                        final Object ctx = entry.getValue();
+                        if (ctx != null) {
+                            cleanContextFields(ctx);
+                        }
+                        iterator.remove();
+                        cleaned++;
+                    }
+                    if (cleaned > 0) {
+                        final long total = CLEANED_COUNT.addAndGet(cleaned);
+                        log.info("EngineClassLoaderCleaner purged {} finished task-context entries (total: {}, remaining: {})",
+                                cleaned, total, finished.size());
                     }
                 }
-                final Object ctx = entry.getValue();
-                if (ctx != null) {
-                    cleanContextFields(ctx);
-                }
-                iterator.remove();
-                cleaned++;
-            }
-            if (cleaned > 0) {
-                final long total = CLEANED_COUNT.addAndGet(cleaned);
-                log.info("EngineClassLoaderCleaner purged {} finished task-context entries (total: {}, remaining: {})",
-                        cleaned, total, finished.size());
             }
             // 联动强制排空已完成作业在 DefaultClassLoaderService 中可能异常残留的 ClassLoader 缓存
             for (Long jobId : completedJobIds) {
+                ORPHAN_DETECTED_TIME.remove(jobId);
                 forceEvictJobClassLoaders(jobId);
             }
+
+            // 提取运行态当前活跃作业 ID 集合
+            final Set<Long> activeJobIds = new HashSet<>();
+            final Object execVal = readFieldValue(target, FIELD_EXECUTION_CONTEXTS);
+            if (execVal instanceof Map) {
+                final Map<?, ?> execMap = (Map<?, ?>) execVal;
+                for (Object key : execMap.keySet()) {
+                    if (key != null) {
+                        final long jobId = extractJobId(key);
+                        if (jobId > 0) {
+                            activeJobIds.add(jobId);
+                        }
+                    }
+                }
+            }
+
+            // 主动全局 Sweep：扫描 classLoaderCache 中无活跃任务的孤儿 ClassLoader
+            sweepOrphanClassLoaders(activeJobIds);
         } catch (Throwable t) {
             log.warn("EngineClassLoaderCleaner finished-context clean skipped (engine version mismatch?): {}",
                     t.getMessage());
+        }
+    }
+
+    /**
+     * 全局主动扫描并排空在 {@code DefaultClassLoaderService} 中滞留且已无活跃任务的孤儿 ClassLoader。
+     *
+     * @param activeJobIds 当前节点运行态中处于活跃状态的作业 ID 集合
+     */
+    public static void sweepOrphanClassLoaders(Set<Long> activeJobIds) {
+        sweepOrphanClassLoaders(activeJobIds, ORPHAN_STALE_MS);
+    }
+
+    /**
+     * 全局主动扫描并排空孤儿 ClassLoader（支持指定陈旧防抖时间，便于单元测试精准校验）。
+     *
+     * @param activeJobIds 当前节点运行态中处于活跃状态的作业 ID 集合
+     * @param maxStaleMs   判定为陈旧孤儿的最小驻留毫秒数
+     */
+    public static void sweepOrphanClassLoaders(Set<Long> activeJobIds, long maxStaleMs) {
+        final Object cls = classLoaderService;
+        if (cls == null) {
+            return;
+        }
+        try {
+            final Object cacheModeVal = readFieldValue(cls, FIELD_CACHE_MODE);
+            if (Boolean.TRUE.equals(cacheModeVal)) {
+                return;
+            }
+            final Object cacheVal = readFieldValue(cls, FIELD_CLASS_LOADER_CACHE);
+            if (!(cacheVal instanceof Map)) {
+                return;
+            }
+            final Map<?, ?> cache = (Map<?, ?>) cacheVal;
+            if (cache.isEmpty()) {
+                ORPHAN_DETECTED_TIME.clear();
+                return;
+            }
+            final long now = System.currentTimeMillis();
+            final Set<Long> candidateJobIds = new HashSet<>();
+            for (Object key : cache.keySet()) {
+                if (key instanceof Number) {
+                    final long jobId = ((Number) key).longValue();
+                    if (jobId > 0 && (activeJobIds == null || !activeJobIds.contains(jobId))) {
+                        candidateJobIds.add(jobId);
+                    }
+                }
+            }
+
+            // 清除重新进入活跃状态的作业记录
+            ORPHAN_DETECTED_TIME.keySet().removeIf(id -> !candidateJobIds.contains(id));
+
+            final Set<Long> toEvict = new HashSet<>();
+            for (Long jobId : candidateJobIds) {
+                final Long firstSeen = ORPHAN_DETECTED_TIME.putIfAbsent(jobId, now);
+                if (firstSeen == null) {
+                    if (maxStaleMs <= 0) {
+                        toEvict.add(jobId);
+                    }
+                } else if ((now - firstSeen) >= maxStaleMs) {
+                    toEvict.add(jobId);
+                }
+            }
+
+            for (Long jobId : toEvict) {
+                ORPHAN_DETECTED_TIME.remove(jobId);
+                forceEvictJobClassLoaders(jobId);
+            }
+        } catch (Throwable t) {
+            log.warn("EngineClassLoaderCleaner sweep orphan ClassLoaders skipped: {}", t.getMessage());
         }
     }
 
