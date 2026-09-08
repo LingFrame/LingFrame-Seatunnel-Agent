@@ -68,7 +68,7 @@ services:
       - ./target/drivers/mysql-connector-java.jar:/opt/seatunnel/lib/mysql-connector-java.jar
     command: >
       sh -c "
-        export JAVA_OPTS=\"$${JAVA_OPTS} -Dlog4j2.configurationFile=/opt/seatunnel/config/log4j2.xml -javaagent:/opt/seatunnel/lib/lingframe-seatunnel-agent.jar\";
+        export JAVA_OPTS=\"$${JAVA_OPTS} -XX:+UnlockDiagnosticVMOptions -Dlog4j2.configurationFile=/opt/seatunnel/config/log4j2.xml -javaagent:/opt/seatunnel/lib/lingframe-seatunnel-agent.jar\";
         /opt/seatunnel/bin/seatunnel-cluster.sh
       "
     healthcheck:
@@ -96,7 +96,7 @@ services:
       - ./target/drivers/mysql-connector-java.jar:/opt/seatunnel/lib/mysql-connector-java.jar
     command: >
       sh -c "
-        export JAVA_OPTS=\"$${JAVA_OPTS} -Dlog4j2.configurationFile=/opt/seatunnel/config/log4j2.xml\";
+        export JAVA_OPTS=\"$${JAVA_OPTS} -XX:+UnlockDiagnosticVMOptions -Dlog4j2.configurationFile=/opt/seatunnel/config/log4j2.xml\";
         /opt/seatunnel/bin/seatunnel-cluster.sh
       "
     healthcheck:

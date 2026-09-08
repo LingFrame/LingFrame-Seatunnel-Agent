@@ -14,13 +14,9 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.AbstractMap.SimpleEntry;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -167,7 +163,7 @@ class MetaspaceLeakIT {
                 .isGreaterThan(10 * 1024 * 1024L);
         log.info("[{}] Metaspace audit started: baseline={} bytes ({})",
                 targetLabel, baseline, formatMb(baseline));
-        final Map<String, Long> baselineHistogram = captureClassHistogramAggregated(containerName);
+        final long[] baselineClassCounts = captureClassCounts(containerName);
 
         // 2. 阶段一：执行 3×3 全正交 9 组作业矩阵（每组执行 2 轮）
         long round1Used = 0L;
@@ -229,12 +225,8 @@ class MetaspaceLeakIT {
         log.info("[{}] Metaspace progression [Concurrent Final]: used={} bytes ({}), deltaFromBaseline={} bytes ({})",
                 targetLabel, finalUsed, formatMb(finalUsed), growth, formatMb(growth));
 
-        final Map<String, Long> finalHistogram = captureClassHistogramAggregated(containerName);
-        if (!baselineHistogram.isEmpty() && !finalHistogram.isEmpty()) {
-            printClassHistogramDiff(targetLabel, baselineHistogram, finalHistogram);
-        } else {
-            log.info("[{}] Class histogram diff skipped (capture unavailable at baseline or final)", targetLabel);
-        }
+        final long[] finalClassCounts = captureClassCounts(containerName);
+        printClassCountDiff(targetLabel, baselineClassCounts, finalClassCounts);
 
         return new MetaspaceAuditResult(baseline, round1Used, round2Used, finalUsed);
     }
@@ -366,81 +358,74 @@ class MetaspaceLeakIT {
     private static final Pattern HEAP_INFO_METASPACE_PATTERN =
             Pattern.compile("Metaspace\\s+used\\s+(\\d+)\\s*K", Pattern.CASE_INSENSITIVE);
 
-    /** jcmd GC.class_histogram 行：` 123:     456      7890  com.example.Foo` */
-    private static final Pattern CLASS_HISTOGRAM_LINE =
-            Pattern.compile("^\\s*\\d+:\\s+\\d+\\s+(\\d+)\\s+(.+)\\s*$");
+    /** jcmd GC.class_stats 加载类数（首段稳定汇总文案） */
+    private static final Pattern GC_CLASS_STATS_LOADED =
+            Pattern.compile("Number of classes loaded\\s*:\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
 
-    private static final int CLASS_HISTOGRAM_TOP_N = 25;
-    private static final String CLASS_HISTOGRAM_INCLUDE =
-            "org\\.apache\\.seatunnel|com\\.mysql|org\\.apache\\.kafka|SeaTunnelChildFirstClassLoader";
+    /** jcmd GC.class_stats 卸载类数（不同 JDK 轻微文案差异，兼容两种写法） */
+    private static final Pattern GC_CLASS_STATS_UNLOADED =
+            Pattern.compile("Number of\\s+(?:classes\\s+)?unloaded\\s*:\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
 
     /**
-     * 执行 jcmd GC.class_histogram 并将同名类的 #bytes 聚合成 Map。
+     * 执行 jcmd GC.class_stats 采集类加载/卸载计数 {@code [loaded, unloaded]}。
      * <p>
-     * 仅聚合可反序列化为看得懂的类；失败时降级为空 Map（不影响主审计流程）。
+     * 注意：与 GC.class_histogram（堆对象）不同，class_stats 统计的是类元数据，
+     * 正是 Metaspace 的增长维度。失败时返回 {@code new long[] {-1L, -1L}} 不影响主审计。
      */
-    private Map<String, Long> captureClassHistogramAggregated(String containerName) {
-        final Map<String, Long> byClass = new LinkedHashMap<>();
+    private long[] captureClassCounts(String containerName) {
         try {
             final String pid = resolveJavaPid(containerName);
             final ProcessBuilder pb = new ProcessBuilder(
-                    "docker", "exec", containerName, "jcmd", pid, "GC.class_histogram");
+                    "docker", "exec", containerName, "jcmd", pid, "GC.class_stats");
             pb.redirectErrorStream(true);
             final Process p = pb.start();
+            final StringBuilder output = new StringBuilder();
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    final Matcher m = CLASS_HISTOGRAM_LINE.matcher(line);
-                    if (m.matches()) {
-                        byClass.merge(m.group(2).trim(), Long.parseLong(m.group(1)), Long::sum);
-                    }
+                    output.append(line).append('\n');
                 }
             }
             p.waitFor(15, TimeUnit.SECONDS);
+            final Matcher lm = GC_CLASS_STATS_LOADED.matcher(output);
+            final Matcher um = GC_CLASS_STATS_UNLOADED.matcher(output);
+            if (lm.find() && um.find()) {
+                return new long[]{Long.parseLong(lm.group(1)), Long.parseLong(um.group(1))};
+            }
+            log.warn("GC.class_stats summary not found (diagnostic options not enabled?); raw head: {}",
+                    output.length() > 200 ? output.substring(0, 200) : output);
+            return new long[]{-1L, -1L};
         } catch (Exception e) {
-            log.warn("class histogram capture failed in container {}: {}", containerName, e.getMessage());
-            return Collections.emptyMap();
+            log.warn("GC.class_stats capture failed in container {}: {}", containerName, e.getMessage());
+            return new long[]{-1L, -1L};
         }
-        return byClass;
     }
 
     /**
-     * 打印 Metaspace 类直方图增量（baseline -> final）Top N，
-     * 用于定位泄漏的是哪些类/所属方向（connector vs 引擎 vs 平台）。
+     * 打印类加载/卸载净增（baseline -> final），定位 Metaspace 泄漏是否源于类未卸载。
+     * <p>
+     * 判据：若加载持续增加而卸载近零（retained 净增），则类元数据未随 job 结束回滚，
+     * Metaspace 泄漏成立；反之说明增长来自空间分配/碎片而非类元数据泄漏。
      */
-    private void printClassHistogramDiff(String targetLabel,
-                                         Map<String, Long> baseline, Map<String, Long> finalSample) {
-        final List<SimpleEntry<String, Long>> growth = new ArrayList<>();
-        for (Map.Entry<String, Long> e : finalSample.entrySet()) {
-            final long delta = e.getValue() - baseline.getOrDefault(e.getKey(), 0L);
-            if (delta > 0) {
-                growth.add(new SimpleEntry<>(e.getKey(), delta));
-            }
-        }
-        growth.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
-
-        final long totalGrowth = growth.stream().mapToLong(SimpleEntry::getValue).sum();
-        log.info("[{}] ========== Metaspace Class Histogram Growth (Top {}) ==========",
-                targetLabel, CLASS_HISTOGRAM_TOP_N);
-        log.info("[{}] Total class-bytes growth: {} ({})",
-                targetLabel, totalGrowth, formatMb(totalGrowth));
-        int shown = 0;
-        for (SimpleEntry<String, Long> e : growth) {
-            if (shown >= CLASS_HISTOGRAM_TOP_N) {
-                break;
-            }
-            final String cls = e.getKey();
-            if (!cls.matches(".*" + CLASS_HISTOGRAM_INCLUDE + ".*")) {
-                continue;
-            }
-            log.info("[{}]   +{} bytes ({})  {}", targetLabel, e.getValue(), formatMb(e.getValue()), cls);
-            shown++;
-        }
-        if (shown == 0) {
-            log.info("[{}]   (no growth within monitored connector/engine class names)",
+    private void printClassCountDiff(String targetLabel, long[] baseline, long[] finalSample) {
+        log.info("[{}] ========== Class Load / Unload Growth (Metaspace root cause) ==========",
+                targetLabel);
+        if (baseline[0] < 0 || finalSample[0] < 0) {
+            log.info("[{}]   (class stats unavailable — ensure -XX:+UnlockDiagnosticVMOptions is set)",
                     targetLabel);
+            log.info("[{}] ===========================================================", targetLabel);
+            return;
         }
+        final long loadedDelta = finalSample[0] - baseline[0];
+        final long unloadedDelta = finalSample[1] - baseline[1];
+        final long retained = loadedDelta - unloadedDelta;
+        log.info("[{}]   loaded classes   baseline={} -> final={} (delta +{})",
+                targetLabel, baseline[0], finalSample[0], loadedDelta);
+        log.info("[{}]   unloaded classes baseline={} -> final={} (delta +{})",
+                targetLabel, baseline[1], finalSample[1], unloadedDelta);
+        log.info("[{}]   retained (loaded - unloaded) delta: +{} classes => 类元数据未卸载证候 {}",
+                targetLabel, retained, retained > 0 ? "成立（Metaspace 泄漏）" : "不成立");
         log.info("[{}] ===========================================================", targetLabel);
     }
 

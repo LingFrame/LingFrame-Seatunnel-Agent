@@ -478,9 +478,8 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
                         } else if (traceLogCounter.getAndIncrement() % config.getLogSampleRate() != 0) {
                             return;
                         }
-                        log.info("[Trace] traceId={}, lingId={}, action={}, type={}, depth={}",
-                                event.getTraceId(), event.getLingId(), event.getAction(),
-                                event.getType(), event.getDepth());
+                        // 已禁用 Trace 打印：全矩阵 E2E 下 Trace 即便限频仍持续产生日志，
+                        // 属运维审计类噪音，改以限频计数（suppressedCount）观测，后续可恢复打印。
                     });
             eventBus.subscribeGlobal(MonitoringEvents.AuditLogEvent.class,
                     (LingEventListener<MonitoringEvents.AuditLogEvent>) event -> {
@@ -496,9 +495,8 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
                         } else if (auditLogCounter.getAndIncrement() % config.getLogSampleRate() != 0) {
                             return;
                         }
-                        log.info("[Audit] traceId={}, lingId={}, action={}, resource={}, success={}",
-                                event.getTraceId(), event.getLingId(), event.getAction(),
-                                event.getResource(), event.isSuccess());
+                        // 已禁用 Audit 打印：与 Trace 同理审计类日志在全矩阵下污染日志，
+                        // 改以限频计数（suppressedCount）观测，后续可恢复打印。
                     });
             eventBus.subscribeGlobal(MonitoringEvents.CircuitBreakerStateEvent.class,
                     (LingEventListener<MonitoringEvents.CircuitBreakerStateEvent>) event ->
