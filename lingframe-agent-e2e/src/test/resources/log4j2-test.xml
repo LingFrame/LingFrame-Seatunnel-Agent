@@ -11,8 +11,12 @@
     </Appenders>
 
     <Loggers>
-        <!-- 压制框架流水线 Trace 与内部事件，坚决防止万行日志刷屏 -->
+        <!-- 压制框架流水线 Trace 与内部治理拒绝告警，坚决防止日志刷屏 -->
         <Logger name="com.lingframe" level="WARN"/>
+        <Logger name="com.lingframe.core.pipeline" level="ERROR"/>
+        <Logger name="com.lingframe.core.resilience" level="ERROR"/>
+        <Logger name="com.lingframe.agent.adapter" level="ERROR"/>
+        <Logger name="com.lingframe.agent.cleaner" level="INFO"/>
 
         <!-- 放开 LingFrame 卸载协调器、JVM 资源清理钩子与类加载器核心验证日志 -->
         <Logger name="com.lingframe.core.ling.LingUnloadCoordinator" level="INFO"/>

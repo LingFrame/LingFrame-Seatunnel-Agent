@@ -346,6 +346,9 @@ public final class AgentConfig {
      * 以保证「显式开启了治理特性就真的生效」；默认全关时本方法返回 {@code false}（不织入）。
      */
     public boolean isEffectiveTaskExecutionAdviceEnabled() {
+        if (!governanceEnabled) {
+            return false;
+        }
         return taskExecutionAdviceEnabled
                 || circuitBreakerEnabled
                 || rateLimiterEnabled

@@ -2,6 +2,7 @@ package com.lingframe.agent.adapter;
 
 import com.lingframe.agent.bridge.LingGovernanceContract;
 import com.lingframe.agent.bridge.ReleasedClassLoaderRegistry;
+import com.lingframe.agent.cleaner.EngineClassLoaderCleaner;
 import com.lingframe.agent.config.AgentConfig;
 import com.lingframe.agent.config.HazelcastConfigCenter;
 import com.lingframe.api.event.LingEventListener;
@@ -104,6 +105,8 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
     private final TraceLogThrottle traceErrorThrottle = new TraceLogThrottle();
     /** 失败审计事件窗口限频器：失败审计与 Trace 失败同根（熔断拒绝等），按签名收敛抑制同类重复，成功审计仍走采样率 */
     private final TraceLogThrottle auditFailThrottle = new TraceLogThrottle();
+    /** 治理拒绝告警窗口限频器：熔断/限流风暴下避免 Worker 调度循环产生海量告警日志刷屏 */
+    private final TraceLogThrottle rejectionThrottle = new TraceLogThrottle();
 
     public SeaTunnelAdapter(AgentConfig config,
                            InvocationPipelineEngine pipelineEngine,
@@ -150,6 +153,7 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
             unloadCoordinator.onFailureCleanup(classLoader);
             log.debug("Unload coordinator completed JVM-level cleanup");
         }
+        EngineClassLoaderCleaner.cleanFinished();
     }
 
     @Override
@@ -275,24 +279,37 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
      * </ul>
      */
     private void handleGovernanceRejection(LingInvocationException e) {
+        final String throttleKey = e.getKind() != null ? e.getKind().name() : "UNKNOWN";
+        final boolean allowLog = rejectionThrottle.tryAcquire(throttleKey, System.currentTimeMillis());
         switch (e.getKind()) {
             case RATE_LIMITED:
-                log.warn("Governance rejected [{}], backing off to next token: {}", e.getKind(), e.getMessage());
+                if (allowLog) {
+                    log.warn("Governance rejected [{}], backing off to next token: {}", e.getKind(), e.getMessage());
+                }
                 backoffController.backoffRatelimited(config.getRateLimitPerSecond());
                 break;
             case CIRCUIT_OPEN:
             case BULKHEAD_FULL:
-                log.warn("Governance rejected [{}], passthrough without backoff (soft path): {}", e.getKind(), e.getMessage());
+                if (allowLog) {
+                    log.warn("Governance rejected [{}], passthrough without backoff (soft path): {}",
+                            e.getKind(), e.getMessage());
+                }
                 break;
             case STATE_REJECTED:
             case ROUTE_FAILURE:
-                log.warn("Governance rejected [{}]: ling unavailable: {}", e.getKind(), e.getMessage());
+                if (allowLog) {
+                    log.warn("Governance rejected [{}]: ling unavailable: {}", e.getKind(), e.getMessage());
+                }
                 break;
             case SECURITY_REJECTED:
-                log.warn("Governance rejected [{}]: permission denied: {}", e.getKind(), e.getMessage());
+                if (allowLog) {
+                    log.warn("Governance rejected [{}]: permission denied: {}", e.getKind(), e.getMessage());
+                }
                 break;
             default:
-                log.warn("Governance rejected [{}]: {}", e.getKind(), e.getMessage());
+                if (allowLog) {
+                    log.warn("Governance rejected [{}]: {}", e.getKind(), e.getMessage());
+                }
                 break;
         }
     }

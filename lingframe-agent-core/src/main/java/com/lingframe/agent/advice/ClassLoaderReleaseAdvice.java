@@ -30,9 +30,6 @@ public final class ClassLoaderReleaseAdvice {
             @Advice.Argument(0) long jobId,
             @Advice.Argument(1) Collection<URL> jars
     ) {
-        if (!LingFrameAgentBridge.isGovernanceEnabled()) {
-            return null;
-        }
         // 从 cache 中精确提取目标 ClassLoader，而非盲目取 TCCL
         // SeaTunnel 在 cacheMode=true 时将 jobId 重定向到 1L，此处须对齐
         final long effectiveJobId = cacheMode ? 1L : jobId;
@@ -52,7 +49,7 @@ public final class ClassLoaderReleaseAdvice {
             @Advice.Argument(1) Collection<URL> jars,
             @Advice.Enter ClassLoader targetLoader
     ) {
-        if (!LingFrameAgentBridge.isGovernanceEnabled() || targetLoader == null) {
+        if (targetLoader == null) {
             return;
         }
 

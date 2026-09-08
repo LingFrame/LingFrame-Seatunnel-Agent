@@ -6,6 +6,8 @@ import com.lingframe.agent.adapter.SeaTunnelAdapter;
 import com.lingframe.agent.bridge.LingFrameAgentBridge;
 import com.lingframe.agent.config.AgentConfig;
 import com.lingframe.agent.advice.ClassLoaderReleaseAdvice;
+import com.lingframe.agent.advice.ClassLoaderServiceCacheAdvice;
+import com.lingframe.agent.advice.JobMasterCleanJobAdvice;
 import com.lingframe.agent.advice.TaskExecutionAdvice;
 import com.lingframe.agent.advice.TaskExecutionServiceCacheAdvice;
 import com.lingframe.agent.advice.TcclGuardAdvice;
@@ -61,6 +63,9 @@ public final class LingFrameAgentActivationRunner {
     /** 引擎执行服务类型——捕获其实例，清理已完成作业上下文中强持有的 ClassLoader 引用 */
     private static final String TASK_EXECUTION_SERVICE_TYPE =
             "org.apache.seatunnel.engine.server.TaskExecutionService";
+    /** 引擎 Master 作业服务类型——拦截 cleanJob，在 Coordinator 终态强制排空作业 ClassLoader 缓存 */
+    private static final String JOB_MASTER_TYPE =
+            "org.apache.seatunnel.engine.server.master.JobMaster";
 
     /**
      * 治理微内核实际装配入口。被 {@link LingFrameAgentPremain#premain} 反射调用，
@@ -74,20 +79,15 @@ public final class LingFrameAgentActivationRunner {
 
         final AgentConfig config = AgentConfig.load(agentArgs);
 
-        // 引擎 ClassLoader 清理必须在治理门控之前安装：MetaspaceLeakIT 以治理关闭
-        // (PASS_THROUGH) 对比 native/agent，本清理让 agent 容器仍能释放引擎已完成作业的
-        // ClassLoader 引用，从而与 native 形成对照、锁定 Metaspace 泄漏。
+        // 引擎 ClassLoader 清理必须在治理门控之前安装：Metaspace 泄漏治理在任何模式均生效
         installEngineClassLoaderCleanup(inst);
 
-        if (!config.isGovernanceEnabled()) {
-            log.info("Governance is disabled by config, Agent runs in PASS_THROUGH mode");
-            return;
-        }
+        final boolean governanceEnabled = config.isGovernanceEnabled();
 
         // Bridge 契约注入已由 premain() 完成（见 LingFrameAgentPremain.premain），
         // 此处 LingGovernanceContract 经双亲委派统一由 Bootstrap 加载，单一副本。
 
-        // 初始化治理微内核与适配器
+        // 初始化治理微内核与适配器（即使业务治理关闭，卸载协调器与底座钩子依然注册，确保物理释放正常生效）
         final AgentGovernanceRuntime governanceRuntime = initGovernanceRuntime(config);
         final SeaTunnelAdapter adapter = new SeaTunnelAdapter(
                 config,
@@ -99,16 +99,23 @@ public final class LingFrameAgentActivationRunner {
 
         final Map<String, String> adviceStatus = new HashMap<>();
 
-        // 作业级治理装配：运行时指纹门控 + JobLingRegistry（隔离单元从引擎收敛到作业）
-        wireJobLevelGovernance(config, adapter, governanceRuntime, adviceStatus);
+        if (governanceEnabled) {
+            // 作业级治理装配：运行时指纹门控 + JobLingRegistry（隔离单元从引擎收敛到作业）
+            wireJobLevelGovernance(config, adapter, governanceRuntime, adviceStatus);
+        }
 
-        // 注册治理契约到 Bridge
+        // 注册治理契约到 Bridge（提供 ClassLoader 清理与物理释放能力）
         LingFrameAgentBridge.registerContract(adapter);
-        // 织入 ByteBuddy 拦截器（含目标类存在性检测，防上游重构静默失效）
+        // 织入 ByteBuddy 拦截器（DefaultClassLoaderService 与 TcclGuard 在任何模式均织入；AbstractTask 由 isEffectiveTaskExecutionAdviceEnabled 门控）
         installByteBuddyAdvice(inst, config, adviceStatus);
         // 注册可观测性 MBean（JMX），运维可 jcmd/jconsole 直接读 advice 状态/EventBus/计时
         registerObservabilityMBean(config, adviceStatus, governanceRuntime, adapter);
-        log.info("LingFrame SeaTunnel Agent activated successfully");
+
+        if (!governanceEnabled) {
+            log.info("Governance is disabled by config, Agent runs in PASS_THROUGH / ClassLoader-cleanup-only mode");
+        } else {
+            log.info("LingFrame SeaTunnel Agent activated successfully");
+        }
     }
 
     private static AgentGovernanceRuntime initGovernanceRuntime(AgentConfig config) {
@@ -280,7 +287,9 @@ public final class LingFrameAgentActivationRunner {
                     .type(ElementMatchers.named(TASK_EXECUTION_SERVICE_TYPE))
                     .transform(new AgentBuilder.Transformer.ForAdvice()
                             .include(TaskExecutionServiceCacheAdvice.class.getClassLoader())
-                            .advice(ElementMatchers.named("getExecutionContext"),
+                            .advice(ElementMatchers.isConstructor()
+                                            .or(ElementMatchers.named("start"))
+                                            .or(ElementMatchers.named("getExecutionContext")),
                                     TaskExecutionServiceCacheAdvice.class.getName()));
             builder.installOn(inst);
             final ScheduledExecutorService scheduler =
@@ -289,7 +298,7 @@ public final class LingFrameAgentActivationRunner {
                         t.setDaemon(true);
                         return t;
                     });
-            scheduler.scheduleWithFixedDelay(EngineClassLoaderCleaner::cleanFinished, 5, 1, TimeUnit.SECONDS);
+            scheduler.scheduleWithFixedDelay(EngineClassLoaderCleaner::cleanFinished, 1, 1, TimeUnit.SECONDS);
             log.info("EngineClassLoaderCleanup ENABLED — capturing TaskExecutionService, releasing finished "
                     + "job ClassLoader refs (interval=1s)");
         } catch (Throwable t) {
@@ -357,14 +366,25 @@ public final class LingFrameAgentActivationRunner {
                     .type(ElementMatchers.named(CLASSLOADER_SERVICE))
                     .transform(new AgentBuilder.Transformer.ForAdvice()
                             .include(ClassLoaderReleaseAdvice.class.getClassLoader())
+                            .advice(ElementMatchers.isConstructor(),
+                                    ClassLoaderServiceCacheAdvice.class.getName())
                             .advice(ElementMatchers.named("releaseClassLoader")
                                     .and(ElementMatchers.takesArgument(0, ElementMatchers.named("long"))),
                                     ClassLoaderReleaseAdvice.class.getName()));
-            log.info("ClassLoaderReleaseAdvice installed for releaseClassLoader interception");
+            log.info("ClassLoaderReleaseAdvice & ClassLoaderServiceCacheAdvice installed for DefaultClassLoaderService");
         } else {
             adviceStatus.put("DefaultClassLoaderService", "SKIPPED");
             log.warn("ClassLoaderReleaseAdvice SKIPPED — target fields missing, ClassLoader leak detection disabled");
         }
+
+        builder = builder
+                .type(ElementMatchers.named(JOB_MASTER_TYPE))
+                .transform(new AgentBuilder.Transformer.ForAdvice()
+                        .include(JobMasterCleanJobAdvice.class.getClassLoader())
+                        .advice(ElementMatchers.named("cleanJob"),
+                                JobMasterCleanJobAdvice.class.getName()));
+        adviceStatus.put("JobMaster", "INSTALLED");
+        log.info("JobMasterCleanJobAdvice installed for cleanJob interception (Coordinator ClassLoader evict)");
 
         builder = installTcclGuardAdvice(builder, adviceStatus);
         builder.installOn(inst);
