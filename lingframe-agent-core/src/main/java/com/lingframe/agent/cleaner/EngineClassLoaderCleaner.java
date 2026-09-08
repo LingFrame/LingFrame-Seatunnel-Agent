@@ -169,12 +169,13 @@ public final class EngineClassLoaderCleaner {
             return;
         }
         try {
-            final Object value = readFieldValue(target, FIELD_FINISHED);
             final Set<Long> completedJobIds = new HashSet<>();
-            if (value instanceof Map) {
-                final Map<?, ?> finished = (Map<?, ?>) value;
+            int cleaned = 0;
+            // 清理 finishedExecutionContexts
+            final Object finishedValue = readFieldValue(target, FIELD_FINISHED);
+            if (finishedValue instanceof Map) {
+                final Map<?, ?> finished = (Map<?, ?>) finishedValue;
                 if (!finished.isEmpty()) {
-                    int cleaned = 0;
                     final Iterator<? extends Map.Entry<?, ?>> iterator = finished.entrySet().iterator();
                     while (iterator.hasNext()) {
                         final Map.Entry<?, ?> entry = iterator.next();
@@ -192,12 +193,40 @@ public final class EngineClassLoaderCleaner {
                         iterator.remove();
                         cleaned++;
                     }
-                    if (cleaned > 0) {
-                        final long total = CLEANED_COUNT.addAndGet(cleaned);
-                        log.info("EngineClassLoaderCleaner purged {} finished task-context entries (total: {}, remaining: {})",
-                                cleaned, total, finished.size());
+                }
+            }
+            // 同步清理 executionContexts 中可能残留的条目（异常退出时 taskDone 未被调用）
+            try {
+                final Object execValue = readFieldValue(target, FIELD_EXECUTION_CONTEXTS);
+                if (execValue instanceof Map) {
+                    final Map<?, ?> execMap = (Map<?, ?>) execValue;
+                    if (!execMap.isEmpty()) {
+                        final Iterator<? extends Map.Entry<?, ?>> it = execMap.entrySet().iterator();
+                        while (it.hasNext()) {
+                            final Map.Entry<?, ?> entry = it.next();
+                            final Object key = entry.getKey();
+                            if (key != null) {
+                                final long jobId = extractJobId(key);
+                                if (jobId > 0) {
+                                    completedJobIds.add(jobId);
+                                }
+                            }
+                            final Object ctx = entry.getValue();
+                            if (ctx != null) {
+                                cleanContextFields(ctx);
+                            }
+                            it.remove();
+                            cleaned++;
+                        }
                     }
                 }
+            } catch (Throwable t2) {
+                log.debug("executionContexts clean skipped: {}", t2.getMessage());
+            }
+            if (cleaned > 0) {
+                final long total = CLEANED_COUNT.addAndGet(cleaned);
+                log.info("EngineClassLoaderCleaner purged {} task-context entries (total: {})",
+                        cleaned, total);
             }
             // 联动强制排空已完成作业在 DefaultClassLoaderService 中可能异常残留的 ClassLoader 缓存
             for (Long jobId : completedJobIds) {
@@ -262,6 +291,18 @@ public final class EngineClassLoaderCleaner {
                             ((Map<?, ?>) runningMap).remove(jobId);
                         }
                     }
+                    // 精准清理 TaskExecutionService 中属于当前 jobId 的 executionContexts 和 finishedExecutionContexts
+                    // 斩断 TaskGroupContext → taskGroup → tasks → Task → Action → Class → ClassLoader 引用链
+                    try {
+                        final Method getTesMethod = server.getClass().getMethod("getTaskExecutionService");
+                        final Object tes = getTesMethod.invoke(server);
+                        if (tes != null) {
+                            register(tes);
+                            cleanTaskExecutionContextsByJobId(tes, jobId);
+                        }
+                    } catch (Throwable t2) {
+                        log.debug("TaskExecutionService cleanup skipped for job {}: {}", jobId, t2.getMessage());
+                    }
                 }
             } catch (Throwable t) {
                 log.debug("CoordinatorService map eviction skipped: {}", t.getMessage());
@@ -275,6 +316,7 @@ public final class EngineClassLoaderCleaner {
             fieldsCleared += nullifyField(jobMaster, "jobDAGInfo");
             fieldsCleared += nullifyField(jobMaster, "checkpointManager");
             fieldsCleared += nullifyField(jobMaster, "jobImmutableInformation");
+            fieldsCleared += nullifyField(jobMaster, "jobMasterCompleteFuture");
 
             // 排空 Hazelcast 分布式 Map 中的 Job 状态与领域对象，彻底切断集群常驻 GC Root
             if (jobId > 0) {
@@ -390,6 +432,7 @@ public final class EngineClassLoaderCleaner {
             }
             if (evicted > 0) {
                 log.info("EngineClassLoaderCleaner evicted {} leaked ClassLoaders for job {}", evicted, jobId);
+                System.gc();
             }
         }
     }
@@ -519,6 +562,64 @@ public final class EngineClassLoaderCleaner {
         } catch (Throwable t) {
             log.debug("ResourceBundle clearCache failed: {}", t.getMessage());
         }
+    }
+
+    /**
+     * 精准清理 TaskExecutionService 中属于指定作业的 executionContexts 和 finishedExecutionContexts。
+     * <p>
+     * 斩断 TaskGroupContext → taskGroup → tasks → Task → Action → Class → ClassLoader 引用链。
+     *
+     * @param tes   TaskExecutionService 实例
+     * @param jobId 作业标识
+     */
+    private static void cleanTaskExecutionContextsByJobId(Object tes, long jobId) {
+        if (tes == null || jobId <= 0) {
+            return;
+        }
+        int removed = 0;
+        removed += removeContextsByJobId(tes, FIELD_FINISHED, jobId);
+        removed += removeContextsByJobId(tes, FIELD_EXECUTION_CONTEXTS, jobId);
+        if (removed > 0) {
+            log.info("EngineClassLoaderCleaner purged {} task-context entries for job {}", removed, jobId);
+        }
+    }
+
+    /**
+     * 从 TaskExecutionService 的指定 Map 字段中移除属于目标作业的条目。
+     *
+     * @param tes       TaskExecutionService 实例
+     * @param fieldName Map 字段名
+     * @param jobId     作业标识
+     * @return 移除的条目数
+     */
+    private static int removeContextsByJobId(Object tes, String fieldName, long jobId) {
+        try {
+            final Object mapObj = readFieldValue(tes, fieldName);
+            if (mapObj instanceof Map) {
+                final Map<?, ?> map = (Map<?, ?>) mapObj;
+                if (map.isEmpty()) {
+                    return 0;
+                }
+                int removed = 0;
+                final Iterator<? extends Map.Entry<?, ?>> it = map.entrySet().iterator();
+                while (it.hasNext()) {
+                    final Map.Entry<?, ?> entry = it.next();
+                    final Object key = entry.getKey();
+                    if (key != null && extractJobId(key) == jobId) {
+                        final Object ctx = entry.getValue();
+                        if (ctx != null) {
+                            cleanContextFields(ctx);
+                        }
+                        it.remove();
+                        removed++;
+                    }
+                }
+                return removed;
+            }
+        } catch (Throwable t) {
+            log.debug("Failed to clean {} for job {}: {}", fieldName, jobId, t.getMessage());
+        }
+        return 0;
     }
 
     /**

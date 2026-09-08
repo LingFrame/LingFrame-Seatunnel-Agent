@@ -16,7 +16,7 @@
     <!-- Adapter 与 Cleaner 反射调用是 Agent 治理宿主的固有需求 -->
     <Match>
         <Class name="~.*(\.adapter|\.cleaner)\..*"/>
-        <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED,REC_CATCH_EXCEPTION,EI_EXPOSE_REP2"/>
+        <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED,REC_CATCH_EXCEPTION,EI_EXPOSE_REP2,DM_GC"/>
     </Match>
 
     <!-- 治理运行时聚合体通过构造函数注入持有各组件引用，这是设计意图 -->
