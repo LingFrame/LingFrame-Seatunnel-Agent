@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * 任务执行期间反复轮询不重复触碰，避免打扰仍在读取该上下文的引擎逻辑。
  * <p>
  * 全程反射、全枚举字段名均按引擎源码校准，任一阶段失败都降级跳过并告警，绝不破坏主审计。
+ * 私有字段反射统一通过 {@code Field.setAccessible(true)} 访问，不使用 AccessController。
  */
 public final class EngineClassLoaderCleaner {
 
@@ -77,10 +78,12 @@ public final class EngineClassLoaderCleaner {
             return;
         }
         try {
-            final Field finishedField = target.getClass().getDeclaredField(FIELD_FINISHED);
-            finishedField.setAccessible(true);
-            final Map<?, ?> finished = (Map<?, ?>) finishedField.get(target);
-            if (finished == null || finished.isEmpty()) {
+            final Object value = readFieldValue(target, FIELD_FINISHED);
+            if (!(value instanceof Map)) {
+                return;
+            }
+            final Map<?, ?> finished = (Map<?, ?>) value;
+            if (finished.isEmpty()) {
                 return;
             }
             int cleaned = 0;
@@ -92,13 +95,13 @@ public final class EngineClassLoaderCleaner {
             if (cleaned > 0) {
                 final long total = CLEANED_COUNT.addAndGet(cleaned);
                 if (total % LOG_THROTTLE == 1) {
-                    log.info("EngineClassLoaderCleaner released {} finished task-context ClassLoader refs (total {})",
-                            cleaned, total);
+                    log.info("EngineClassLoaderCleaner released {} finished task-context "
+                            + "ClassLoader refs (total {})", cleaned, total);
                 }
             }
         } catch (Throwable t) {
-            log.warn("EngineClassLoaderCleaner finished-context clean skipped (engine version mismatch?): {}",
-                    t.getMessage());
+            log.warn("EngineClassLoaderCleaner finished-context clean skipped "
+                    + "(engine version mismatch?): {}", t.getMessage());
         }
     }
 
@@ -114,26 +117,35 @@ public final class EngineClassLoaderCleaner {
         }
         try {
             final Class<?> clazz = ctx.getClass();
-            final Map<?, ?> classLoaders = clearMapField(clazz, ctx, FIELD_CLASS_LOADERS);
-            final Map<?, ?> jars = clearMapField(clazz, ctx, FIELD_JARS);
+            clearMapField(clazz, ctx, FIELD_CLASS_LOADERS);
+            clearMapField(clazz, ctx, FIELD_JARS);
             final Field tgField = clazz.getDeclaredField(FIELD_TASK_GROUP);
             tgField.setAccessible(true);
             tgField.set(ctx, null);
             CLEANED.add(ctx);
             return true;
         } catch (Throwable t) {
-            log.warn("EngineClassLoaderCleaner skip single context (field mismatch?): {}", t.getMessage());
+            log.warn("EngineClassLoaderCleaner skip single context (field mismatch?): {}",
+                    t.getMessage());
             return false;
         }
     }
 
-    private static Map<?, ?> clearMapField(Class<?> clazz, Object owner, String fieldName) throws Exception {
+    /** 读取宿主对象的私有字段值。 */
+    private static Object readFieldValue(Object owner, String fieldName) throws Exception {
+        final Field field = owner.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return field.get(owner);
+    }
+
+    /** 清空宿主对象某个 Map 字段（私有字段，需放宽访问权限）。 */
+    private static void clearMapField(Class<?> clazz, Object owner, String fieldName)
+            throws Exception {
         final Field field = clazz.getDeclaredField(fieldName);
         field.setAccessible(true);
         final Object value = field.get(owner);
         if (value instanceof Map) {
             ((Map<?, ?>) value).clear();
         }
-        return (Map<?, ?>) value;
     }
 }
