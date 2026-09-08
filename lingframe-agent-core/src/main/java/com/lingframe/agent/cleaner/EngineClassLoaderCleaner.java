@@ -5,9 +5,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.beans.Introspector;
+import java.lang.reflect.AccessibleObject;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.URLClassLoader;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -406,19 +409,12 @@ public final class EngineClassLoaderCleaner {
      * @param cl 目标类加载器
      */
     public static void closeClassLoaderSafely(ClassLoader cl) {
-        if (!(cl instanceof URLClassLoader)) {
+        if (cl == null || isSystemOrHostClassLoader(cl)) {
             return;
         }
-        if (isSystemOrHostClassLoader(cl)) {
-            log.debug("Skipping close for system or host ClassLoader: {}", cl.getClass().getName());
-            return;
-        }
-        try {
-            ((URLClassLoader) cl).close();
-            log.info("Safely closed isolated job ClassLoader: {}", cl.getClass().getName());
-        } catch (Throwable t) {
-            log.warn("Failed to close isolated job ClassLoader {}: {}", cl.getClass().getName(), t.getMessage());
-        }
+        // Metaspace 回收 100% 依赖断开 GC Root 强引用，由 JVM 垃圾收集器自然回收 ClassLoader 元数据；
+        // 绝不主动暴力调用 close() 切断底层 JarFile 句柄，避免破坏作业配置解析、延迟加载与状态反序列化生命周期。
+        log.debug("Preserving isolated job ClassLoader lifecycle without violent close: {}", cl.getClass().getName());
     }
 
     /**
@@ -554,7 +550,7 @@ public final class EngineClassLoaderCleaner {
     private static int nullifyField(Object target, String fieldName) {
         try {
             final Field field = target.getClass().getDeclaredField(fieldName);
-            field.setAccessible(true);
+            setAccessibleSafely(field);
             field.set(target, null);
             return 1;
         } catch (NoSuchFieldException e) {
@@ -571,7 +567,7 @@ public final class EngineClassLoaderCleaner {
     private static long extractJobId(Object locationKey) {
         try {
             final Field field = locationKey.getClass().getDeclaredField(FIELD_JOB_ID);
-            field.setAccessible(true);
+            setAccessibleSafely(field);
             final Object val = field.get(locationKey);
             if (val instanceof Number) {
                 return ((Number) val).longValue();
@@ -593,7 +589,7 @@ public final class EngineClassLoaderCleaner {
             clearMapField(clazz, ctx, FIELD_CLASS_LOADERS);
             clearMapField(clazz, ctx, FIELD_JARS);
             final Field tgField = clazz.getDeclaredField(FIELD_TASK_GROUP);
-            tgField.setAccessible(true);
+            setAccessibleSafely(tgField);
             tgField.set(ctx, null);
         } catch (Throwable t) {
             log.warn("EngineClassLoaderCleaner failed to clean context fields: {}", t.getMessage());
@@ -603,7 +599,7 @@ public final class EngineClassLoaderCleaner {
     /** 读取宿主对象的私有字段值。 */
     private static Object readFieldValue(Object owner, String fieldName) throws Exception {
         final Field field = owner.getClass().getDeclaredField(fieldName);
-        field.setAccessible(true);
+        setAccessibleSafely(field);
         return field.get(owner);
     }
 
@@ -611,7 +607,7 @@ public final class EngineClassLoaderCleaner {
     private static void clearMapField(Class<?> clazz, Object owner, String fieldName)
             throws Exception {
         final Field field = clazz.getDeclaredField(fieldName);
-        field.setAccessible(true);
+        setAccessibleSafely(field);
         final Object value = field.get(owner);
         if (value instanceof Map) {
             ((Map<?, ?>) value).clear();
@@ -621,7 +617,15 @@ public final class EngineClassLoaderCleaner {
     /** 读取类的静态私有字段值。 */
     private static Object readStaticFieldValue(Class<?> clazz, String fieldName) throws Exception {
         final Field field = clazz.getDeclaredField(fieldName);
-        field.setAccessible(true);
+        setAccessibleSafely(field);
         return field.get(null);
+    }
+
+    /** 安全地在 doPrivileged 块中放宽反射对象的访问权限。 */
+    private static void setAccessibleSafely(final AccessibleObject accessibleObject) {
+        AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
+            accessibleObject.setAccessible(true);
+            return null;
+        });
     }
 }

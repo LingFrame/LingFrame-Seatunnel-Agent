@@ -394,10 +394,18 @@ class MetaspaceLeakIT {
                 }
             }
             p.waitFor(15, TimeUnit.SECONDS);
-            // jstat -class 输出两行（表头 + 数值），按表头映射 Loaded/Unloaded 列，避免列序依赖
-            if (lines.size() >= 2) {
-                final String[] headers = lines.get(0).split("\\s+");
-                final String[] values = lines.get(1).split("\\s+");
+            // 过滤 JVM 工具参数输出（如 Picked up JAVA_TOOL_OPTIONS 等），动态匹配包含 Loaded/Unloaded 的真实表头行
+            int headerIdx = -1;
+            for (int i = 0; i < lines.size(); i++) {
+                final String l = lines.get(i);
+                if (l.contains("Loaded") && l.contains("Unloaded")) {
+                    headerIdx = i;
+                    break;
+                }
+            }
+            if (headerIdx >= 0 && headerIdx + 1 < lines.size()) {
+                final String[] headers = lines.get(headerIdx).split("\\s+");
+                final String[] values = lines.get(headerIdx + 1).split("\\s+");
                 final int loadedIdx = indexOf(headers, "Loaded");
                 final int unloadedIdx = indexOf(headers, "Unloaded");
                 if (loadedIdx >= 0 && unloadedIdx >= 0
@@ -692,9 +700,18 @@ class MetaspaceLeakIT {
         }
         jstatP.waitFor(10, TimeUnit.SECONDS);
 
-        if (jstatLines.size() >= 2) {
-            final String[] headers = jstatLines.get(0).split("\\s+");
-            final String[] values = jstatLines.get(1).split("\\s+");
+        // 动态定位包含 MU 的真实表头行
+        int headerIdx = -1;
+        for (int i = 0; i < jstatLines.size(); i++) {
+            final String l = jstatLines.get(i);
+            if (l.contains("MU")) {
+                headerIdx = i;
+                break;
+            }
+        }
+        if (headerIdx >= 0 && headerIdx + 1 < jstatLines.size()) {
+            final String[] headers = jstatLines.get(headerIdx).split("\\s+");
+            final String[] values = jstatLines.get(headerIdx + 1).split("\\s+");
             int muIndex = -1;
             for (int i = 0; i < headers.length; i++) {
                 if ("MU".equalsIgnoreCase(headers[i])) {

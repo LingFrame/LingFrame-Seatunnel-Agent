@@ -49,19 +49,10 @@ public final class ClassLoaderReleaseAdvice {
             @Advice.Argument(1) Collection<URL> jars,
             @Advice.Enter ClassLoader targetLoader
     ) {
-        if (targetLoader == null) {
-            return;
-        }
-
-        // 物理卸载判定：仅非缓存模式才核验是否需要物理释放
-        // cacheMode=true 时 ClassLoader 被多作业共享，绝不能物理关闭
-        if (!cacheMode) {
-            final Map<String, ClassLoader> jobMap = cache.get(jobId);
-            final String key = LingFrameAgentBridge.convertJarsToKey(jars);
-            final boolean isRemoved = (jobMap == null || !jobMap.containsKey(key));
-            if (isRemoved) {
-                LingFrameAgentBridge.onPhysicalRelease(targetLoader);
-            }
+        // releaseClassLoader 仅为引擎内部引用计数递减（例如作业配置解析生成 DAG 后即会归还解析引用），
+        // 绝不代表作业已终态，严禁在此阶段提前触发类加载器物理释放与关闭。
+        if (Thread.currentThread().getContextClassLoader() == targetLoader) {
+            Thread.currentThread().setContextClassLoader(ClassLoader.getSystemClassLoader());
         }
     }
 
