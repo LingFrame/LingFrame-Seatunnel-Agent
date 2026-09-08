@@ -27,6 +27,8 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -77,6 +79,40 @@ class SeaTunnelAdapterTest {
             final URLClassLoader urlClassLoader = new URLClassLoader(new URL[0], getClass().getClassLoader());
             adapter.onPhysicalRelease(urlClassLoader);
             assertThat(ReleasedClassLoaderRegistry.isReleased(urlClassLoader)).isTrue();
+        }
+
+        @Test
+        @DisplayName("物理释放应同步将活动线程残留的 TCCL 重置为 SystemClassLoader")
+        void shouldResetThreadContextClassLoaderOnPhysicalRelease() throws Exception {
+            final AgentConfig config = TestAgentConfigs.create(true, true, true, false, false, false);
+            final SeaTunnelAdapter adapter = new SeaTunnelAdapter(config, null, null, null, null, null);
+
+            final ClassLoader loader = new ClassLoader() { };
+            final CountDownLatch threadStarted = new CountDownLatch(1);
+            final CountDownLatch threadEnd = new CountDownLatch(1);
+
+            final Thread workerThread = new Thread(() -> {
+                Thread.currentThread().setContextClassLoader(loader);
+                threadStarted.countDown();
+                try {
+                    threadEnd.await(3, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }, "seatunnel-mock-tccl-worker");
+
+            workerThread.start();
+            try {
+                assertThat(threadStarted.await(2, TimeUnit.SECONDS)).isTrue();
+                assertThat(workerThread.getContextClassLoader()).isSameAs(loader);
+
+                adapter.onPhysicalRelease(loader);
+
+                assertThat(workerThread.getContextClassLoader()).isSameAs(ClassLoader.getSystemClassLoader());
+            } finally {
+                threadEnd.countDown();
+                workerThread.join(2000);
+            }
         }
     }
 

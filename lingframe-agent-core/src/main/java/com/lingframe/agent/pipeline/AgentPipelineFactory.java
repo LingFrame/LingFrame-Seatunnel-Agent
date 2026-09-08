@@ -27,7 +27,7 @@ import com.lingframe.core.resource.JdbcDriverUnloadHook;
 import com.lingframe.core.resource.JvmShutdownHookUnloadHook;
 import com.lingframe.core.resource.LoggingFrameworkUnloadHook;
 import com.lingframe.core.resource.RmiTargetUnloadHook;
-import com.lingframe.core.resource.ThreadReferenceUnloadHook;
+import com.lingframe.agent.hook.EngineSafeThreadReferenceUnloadHook;
 import com.lingframe.core.routing.LabelMatchRouter;
 import com.lingframe.core.security.DefaultPermissionService;
 import com.lingframe.core.spi.LeakDetector;
@@ -146,7 +146,7 @@ public final class AgentPipelineFactory {
         final LeakDetector leakDetector = new DefaultLeakDetector(eventBus, config);
         final List<LingUnloadHook> jvmHooks = Arrays.asList(
                 new JdbcDriverUnloadHook(),
-                new ThreadReferenceUnloadHook(),
+                new EngineSafeThreadReferenceUnloadHook(),
                 new JvmShutdownHookUnloadHook(),
                 new RmiTargetUnloadHook(),
                 new LoggingFrameworkUnloadHook(),
