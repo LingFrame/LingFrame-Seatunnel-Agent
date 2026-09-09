@@ -155,9 +155,9 @@ class MetaspaceAuditOfflineTest {
                 "",
                 "<bootstrap>\t515\t900000\t  null  \tlive\t<internal>",
                 "0x000000066b4c5f00\t8010\t16000000\t0x000000066b4ba178\tlive\tsun/misc/Launcher$AppClassLoader@0x123",
-                "0x0000000abc100001\t500\t100000\t0x000000066b4c5f00\tdead\torg/apache/seatunnel/engine/common/loader/SeaTunnelChildFirstClassLoader@0x456",
-                "0x0000000abc100002\t500\t100000\t0x000000066b4c5f00\tdead\torg/apache/seatunnel/engine/common/loader/SeaTunnelChildFirstClassLoader@0x789",
-                "0x0000000abc100003\t600\t120000\t0x000000066b4c5f00\tlive\torg/apache/seatunnel/engine/common/loader/SeaTunnelChildFirstClassLoader@0xabc",
+                "0x0abc100001\t500\t100000\t0x066b4c5f00\tdead\tSeaTunnelChildFirstClassLoader@0x456",
+                "0x0abc100002\t500\t100000\t0x066b4c5f00\tdead\tSeaTunnelChildFirstClassLoader@0x789",
+                "0x0abc100003\t600\t120000\t0x066b4c5f00\tlive\tSeaTunnelChildFirstClassLoader@0xabc",
                 "",
                 "total = 6\t9625\t16220000\t    N/A    \talive=3, dead=2\t    N/A    "
         );
@@ -181,7 +181,7 @@ class MetaspaceAuditOfflineTest {
                 "class_loader classes bytes parent_loader alive? type",
                 "",
                 "<bootstrap> 515 900000 null live <internal>",
-                "0x0000000abc100001 500 100000 0x000000066b4c5f00 dead org/apache/seatunnel/engine/common/loader/SeaTunnelChildFirstClassLoader@0x456",
+                "0x0abc100001 500 100000 0x066b4c5f00 dead SeaTunnelChildFirstClassLoader@0x456",
                 "0x000000066b4c5f00 8010 16000000 0x000000066b4ba178 live sun/misc/Launcher$AppClassLoader@0x123",
                 "",
                 "total = 4 9025 16900000 N/A alive=2, dead=1 N/A"
