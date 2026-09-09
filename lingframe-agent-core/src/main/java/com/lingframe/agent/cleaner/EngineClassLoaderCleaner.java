@@ -390,6 +390,44 @@ public final class EngineClassLoaderCleaner {
     }
 
     /**
+     * 检查 {@code running-job} IMap 中是否仍存在指定作业的条目。
+     * <p>
+     * {@code forceEvictJobClassLoaders} 在释放 ClassLoader 前调用此方法：
+     * 若 {@code running-job} IMap 中条目仍在，说明引擎尚未完成 {@code JobMaster.cleanJob()}
+     * 对该条目的移除。此时释放 ClassLoader 会导致 Hazelcast 序列化 {@code JobInfo} 时
+     * jobStatus 字段丢失（类已卸载），REST API 返回 {@code {"jobId":"xxx"}} 无 jobStatus。
+     * 延迟到引擎移除 {@code running-job} 条目后再释放，保证 REST API 正常工作。
+     *
+     * @param jobId 作业标识
+     * @return {@code true} 若 {@code running-job} IMap 中仍有该 jobId 条目
+     */
+    private static boolean isJobInRunningJobIMap(long jobId) {
+        try {
+            final Collection<HazelcastInstance> instances = Hazelcast.getAllHazelcastInstances();
+            if (instances == null || instances.isEmpty()) {
+                return false;
+            }
+            final Long boxedJobId = jobId;
+            for (HazelcastInstance hz : instances) {
+                if (hz == null) {
+                    continue;
+                }
+                try {
+                    final IMap<Object, Object> runningJobMap = hz.getMap("running-job");
+                    if (runningJobMap.containsKey(boxedJobId)) {
+                        return true;
+                    }
+                } catch (Throwable t) {
+                    log.debug("running-job IMap check skipped for job {}: {}", jobId, t.getMessage());
+                }
+            }
+        } catch (Throwable t) {
+            log.debug("running-job IMap check failed for job {}: {}", jobId, t.getMessage());
+        }
+        return false;
+    }
+
+    /**
 
      * 针对指定作业，强制从 {@code DefaultClassLoaderService.classLoaderCache} 中剥离残留项。
      * <p>
@@ -402,6 +440,11 @@ public final class EngineClassLoaderCleaner {
      */
     public static void forceEvictJobClassLoaders(long jobId) {
         if (jobId <= 0) {
+            return;
+        }
+        if (isJobInRunningJobIMap(jobId)) {
+            log.debug("forceEvictJobClassLoaders deferred for job {}: running-job IMap entry still exists, "
+                    + "delaying ClassLoader release to preserve REST API serialization integrity.", jobId);
             return;
         }
         final Set<ClassLoader> toRelease = new HashSet<>();

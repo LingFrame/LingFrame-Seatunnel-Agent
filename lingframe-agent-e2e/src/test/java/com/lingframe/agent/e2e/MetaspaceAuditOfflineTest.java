@@ -115,4 +115,115 @@ class MetaspaceAuditOfflineTest {
                 .as("Baseline Metaspace must be > 10MB")
                 .isGreaterThan(10 * 1024 * 1024L);
     }
+
+    @Test
+    @DisplayName("jmap -clstats 本地真实输出（tab 分隔）：bootstrap=450, App=1, other=0")
+    void testParseClassLoaderStatsLocalJdk8Output() {
+        final List<String> lines = Arrays.asList(
+                "Attaching to process ID 43372, please wait...",
+                "Debugger attached successfully.",
+                "Server compiler detected.",
+                "JVM version is 25.442-b06",
+                "finding class loader instances ..done.",
+                "class_loader\tclasses\tbytes\tparent_loader\talive?\ttype",
+                "",
+                "<bootstrap>\t450\t885213\t  null  \tlive\t<internal>",
+                "0x000000066b4ba178\t0\t0\t  null  \tlive\tsun/misc/Launcher$ExtClassLoader@0x00000007c000fad8",
+                "0x000000066b4c5f00\t1\t1074\t0x000000066b4ba178\tlive\tsun/misc/Launcher$AppClassLoader@0x00000007c000f730",
+                "",
+                "total = 3\t451\t886287\t    N/A    \talive=3, dead=0\t    N/A    ",
+                "computing per loader stat ..done.",
+                "please wait.. computing liveness......done."
+        );
+
+        final MetaspaceLeakIT.ClassLoaderStatsResult r =
+                MetaspaceLeakIT.parseClassLoaderStats(lines);
+
+        assertThat(r.parsedLines).isEqualTo(3);
+        assertThat(r.bootstrapClasses).isEqualTo(450L);
+        assertThat(r.appClasses).isEqualTo(1L);
+        assertThat(r.subClTotalClasses).isEqualTo(0L);
+        assertThat(r.subClAlive + r.subClDead).isEqualTo(0);
+        assertThat(r.otherClasses).isEqualTo(0L);
+    }
+
+    @Test
+    @DisplayName("jmap -clstats 含 SeaTunnelChildFirstClassLoader（tab 分隔）：subCl 正确归类")
+    void testParseClassLoaderStatsWithSeaTunnelChildCL() {
+        final List<String> lines = Arrays.asList(
+                "class_loader\tclasses\tbytes\tparent_loader\talive?\ttype",
+                "",
+                "<bootstrap>\t515\t900000\t  null  \tlive\t<internal>",
+                "0x000000066b4c5f00\t8010\t16000000\t0x000000066b4ba178\tlive\tsun/misc/Launcher$AppClassLoader@0x123",
+                "0x0000000abc100001\t500\t100000\t0x000000066b4c5f00\tdead\torg/apache/seatunnel/engine/common/loader/SeaTunnelChildFirstClassLoader@0x456",
+                "0x0000000abc100002\t500\t100000\t0x000000066b4c5f00\tdead\torg/apache/seatunnel/engine/common/loader/SeaTunnelChildFirstClassLoader@0x789",
+                "0x0000000abc100003\t600\t120000\t0x000000066b4c5f00\tlive\torg/apache/seatunnel/engine/common/loader/SeaTunnelChildFirstClassLoader@0xabc",
+                "",
+                "total = 6\t9625\t16220000\t    N/A    \talive=3, dead=2\t    N/A    "
+        );
+
+        final MetaspaceLeakIT.ClassLoaderStatsResult r =
+                MetaspaceLeakIT.parseClassLoaderStats(lines);
+
+        assertThat(r.parsedLines).isEqualTo(5);
+        assertThat(r.bootstrapClasses).isEqualTo(515L);
+        assertThat(r.appClasses).isEqualTo(8010L);
+        assertThat(r.subClTotalClasses).isEqualTo(1600L);
+        assertThat(r.subClAlive).isEqualTo(1);
+        assertThat(r.subClDead).isEqualTo(2);
+        assertThat(r.otherClasses).isEqualTo(0L);
+    }
+
+    @Test
+    @DisplayName("jmap -clstats 空格分隔格式：解析逻辑回退到 split(\\\\s+) 后正确归类")
+    void testParseClassLoaderStatsSpaceSeparated() {
+        final List<String> lines = Arrays.asList(
+                "class_loader classes bytes parent_loader alive? type",
+                "",
+                "<bootstrap> 515 900000 null live <internal>",
+                "0x0000000abc100001 500 100000 0x000000066b4c5f00 dead org/apache/seatunnel/engine/common/loader/SeaTunnelChildFirstClassLoader@0x456",
+                "0x000000066b4c5f00 8010 16000000 0x000000066b4ba178 live sun/misc/Launcher$AppClassLoader@0x123",
+                "",
+                "total = 4 9025 16900000 N/A alive=2, dead=1 N/A"
+        );
+
+        final MetaspaceLeakIT.ClassLoaderStatsResult r =
+                MetaspaceLeakIT.parseClassLoaderStats(lines);
+
+        assertThat(r.parsedLines).isEqualTo(3);
+        assertThat(r.bootstrapClasses).isEqualTo(515L);
+        assertThat(r.appClasses).isEqualTo(8010L);
+        assertThat(r.subClTotalClasses).isEqualTo(500L);
+        assertThat(r.subClDead).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("jmap -clstats bootstrap 行 type 为 <bootstrap> 而非 <internal>：正确匹配")
+    void testParseClassLoaderStatsBootstrapTypeVariant() {
+        final List<String> lines = Arrays.asList(
+                "class_loader\tclasses\tbytes\tparent_loader\talive?\ttype",
+                "<bootstrap>\t515\t900000\t  null  \tlive\t<bootstrap>"
+        );
+
+        final MetaspaceLeakIT.ClassLoaderStatsResult r =
+                MetaspaceLeakIT.parseClassLoaderStats(lines);
+
+        assertThat(r.bootstrapClasses).isEqualTo(515L);
+    }
+
+    @Test
+    @DisplayName("jmap -clstats total 行以空格开头：contains 跳过不误解析")
+    void testParseClassLoaderStatsTotalLineWithLeadingSpace() {
+        final List<String> lines = Arrays.asList(
+                "class_loader\tclasses\tbytes\tparent_loader\talive?\ttype",
+                "<bootstrap>\t515\t900000\t  null  \tlive\t<internal>",
+                " total = 3\t516\t900000\t    N/A    \talive=1, dead=0\t    N/A    "
+        );
+
+        final MetaspaceLeakIT.ClassLoaderStatsResult r =
+                MetaspaceLeakIT.parseClassLoaderStats(lines);
+
+        assertThat(r.parsedLines).isEqualTo(1);
+        assertThat(r.bootstrapClasses).isEqualTo(515L);
+    }
 }

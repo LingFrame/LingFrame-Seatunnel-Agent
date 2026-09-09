@@ -67,10 +67,11 @@ class MetaspaceLeakIT {
         private final long unloadedDelta;
         private final long retainedClasses;
         private final long classLoaderCount;
+        private final ClassLoaderStatsResult baselineClStats;
 
         MetaspaceAuditResult(long baseline, long round1, long round2, long finalUsed,
                              long loadedDelta, long unloadedDelta, long retainedClasses,
-                             long classLoaderCount) {
+                             long classLoaderCount, ClassLoaderStatsResult baselineClStats) {
             this.baseline = baseline;
             this.round1 = round1;
             this.round2 = round2;
@@ -80,6 +81,7 @@ class MetaspaceLeakIT {
             this.unloadedDelta = unloadedDelta;
             this.retainedClasses = retainedClasses;
             this.classLoaderCount = classLoaderCount;
+            this.baselineClStats = baselineClStats;
         }
 
         public long getBaseline() {
@@ -116,6 +118,10 @@ class MetaspaceLeakIT {
 
         public long getClassLoaderCount() {
             return classLoaderCount;
+        }
+
+        public ClassLoaderStatsResult getBaselineClStats() {
+            return baselineClStats;
         }
     }
 
@@ -204,8 +210,8 @@ class MetaspaceLeakIT {
         log.info("========================================================================");
 
         // 按 ClassLoader 分组打印类统计，证明 retained classes 归属（非子 CL）
-        dumpClassLoaderStats(AGENT_CONTAINER_NAME, "Agent-Treatment");
-        dumpClassLoaderStats(NATIVE_CONTAINER_NAME, "Native-Control");
+        dumpClassLoaderStats(AGENT_CONTAINER_NAME, "Agent-Treatment", agentResult.getBaselineClStats());
+        dumpClassLoaderStats(NATIVE_CONTAINER_NAME, "Native-Control", nativeResult.getBaselineClStats());
 
         assertThat(netOverhead)
                 .as("Agent net overhead should be <= %d bytes, actual: %d (nativeGrowth: %d, agentGrowth: %d)",
@@ -277,6 +283,7 @@ class MetaspaceLeakIT {
         log.info("[{}] Metaspace audit started: baseline={} bytes ({})",
                 targetLabel, baseline, formatMb(baseline));
         final long[] baselineClassCounts = captureClassCounts(containerName);
+        final ClassLoaderStatsResult baselineClStats = captureClassLoaderStats(containerName, targetLabel + "-baseline");
 
         // 2. 阶段一：执行 3×3 全正交 9 组作业矩阵（每组执行 2 轮）
         long round1Used = 0L;
@@ -372,7 +379,7 @@ class MetaspaceLeakIT {
         log.info("[{}] SeaTunnelChildFirstClassLoader live instances: {}",
                 targetLabel, classLoaderCount);
         return new MetaspaceAuditResult(baseline, round1Used, round2Used, finalUsed,
-                loadedDelta, unloadedDelta, retainedClasses, classLoaderCount);
+                loadedDelta, unloadedDelta, retainedClasses, classLoaderCount, baselineClStats);
     }
 
 
@@ -556,6 +563,7 @@ class MetaspaceLeakIT {
         final long deadline = System.currentTimeMillis() + timeoutSeconds * 1000L;
         String lastStatus = "UNKNOWN";
         boolean apiNoStatusLogged = false;
+
         while (System.currentTimeMillis() < deadline) {
             final HttpURLConnection conn = (HttpURLConnection) new URL(jobInfoUrl).openConnection();
             try {
@@ -585,6 +593,11 @@ class MetaspaceLeakIT {
                             log.info("[{}] Job {} -> FINISHED (via REST API finished-job-state)", jobTag, jobId);
                             return;
                         }
+                        if ("FAILED".equals(finishedStatus) || "CANCELED".equals(finishedStatus)) {
+                            throw new IOException("Job " + jobTag + " (id=" + jobId
+                                    + ") ended with status " + finishedStatus
+                                    + " (via REST API finished-job-state)");
+                        }
                         if (!apiNoStatusLogged) {
                             log.warn("[{}] Job {} REST API returned no jobStatus, body: {}. "
                                     + "Falling back to container log.", jobTag, jobId, body);
@@ -601,6 +614,7 @@ class MetaspaceLeakIT {
                                 throw new IOException("Job " + jobTag + " (id=" + jobId
                                         + ") ended with status " + logStatus + " (via container log)");
                             }
+
                         }
                     }
                 } else {
@@ -641,7 +655,9 @@ class MetaspaceLeakIT {
                 conn.setRequestMethod("GET");
                 conn.setConnectTimeout(5000);
                 conn.setReadTimeout(10000);
-                if (conn.getResponseCode() != 200) {
+                final int responseCode = conn.getResponseCode();
+                if (responseCode != 200) {
+                    log.debug("queryFinishedJobState: {} -> HTTP {} (no body)", finishedJobUrl, responseCode);
                     return null;
                 }
                 final String body;
@@ -650,13 +666,16 @@ class MetaspaceLeakIT {
                 }
                 final String status = extractJsonField(body, "jobStatus");
                 if (status != null) {
+                    log.debug("queryFinishedJobState: {} -> jobStatus={}", finishedJobUrl, status);
                     return status;
                 }
                 for (String s : new String[]{"FINISHED", "FAILED", "CANCELED"}) {
                     if (body.contains(s)) {
+                        log.debug("queryFinishedJobState: {} -> matched '{}' in body: {}", finishedJobUrl, s, body);
                         return s;
                     }
                 }
+                log.debug("queryFinishedJobState: {} -> no status found in body: {}", finishedJobUrl, body);
             } finally {
                 conn.disconnect();
             }
@@ -825,7 +844,7 @@ class MetaspaceLeakIT {
      * @param containerName 容器名
      * @param label 审计标签（如 "Agent-Treatment"）
      */
-    private void dumpClassLoaderStats(String containerName, String label) {
+    private ClassLoaderStatsResult captureClassLoaderStats(String containerName, String label) {
         try {
             final String pid = resolveJavaPid(containerName);
             final ProcessBuilder pb = new ProcessBuilder(
@@ -843,94 +862,54 @@ class MetaspaceLeakIT {
             final boolean exited = p.waitFor(30, TimeUnit.SECONDS);
             final int exitCode = exited ? p.exitValue() : -1;
 
-            long bootstrapClasses = 0;
-            long appClasses = 0;
-            long subClTotalClasses = 0;
-            int subClAlive = 0;
-            int subClDead = 0;
-            long otherClasses = 0;
-            int otherAlive = 0;
-            int otherDead = 0;
-            int parsedLines = 0;
+            final ClassLoaderStatsResult r = parseClassLoaderStats(lines);
 
-            for (String line : lines) {
-                if (line == null || line.isEmpty() || line.startsWith("class_loader")
-                        || line.startsWith("total") || line.startsWith("finding")
-                        || line.startsWith("computing") || line.startsWith("please")
-                        || line.startsWith("Attaching") || line.startsWith("Debugger")
-                        || line.startsWith("Server compiler") || line.startsWith("JVM version")) {
-                    continue;
-                }
-                String[] cols = line.split("\\t");
-                if (cols.length < 5) {
-                    cols = line.split("\\s+");
-                }
-                if (cols.length < 5) {
-                    continue;
-                }
-                final String clRef = cols[0].trim();
-                final long classesCount;
-                try {
-                    classesCount = Long.parseLong(cols[1].trim());
-                } catch (NumberFormatException nfe) {
-                    continue;
-                }
-                final String aliveStatus = cols[4].trim();
-                final boolean isAlive = "live".equalsIgnoreCase(aliveStatus);
-                final String typeStr = cols.length > 5 ? cols[5].trim() : "";
-                parsedLines++;
-
-                if ("<bootstrap>".equals(clRef)) {
-                    bootstrapClasses = classesCount;
-                } else if (typeStr.contains("SeaTunnelChildFirstClassLoader")) {
-                    subClTotalClasses += classesCount;
-                    if (isAlive) {
-                        subClAlive++;
-                    } else {
-                        subClDead++;
-                    }
-                } else if (typeStr.contains("AppClassLoader")) {
-                    appClasses = classesCount;
-                } else if (typeStr.contains("ExtClassLoader")) {
-                    otherClasses += classesCount;
-                    if (isAlive) {
-                        otherAlive++;
-                    } else {
-                        otherDead++;
-                    }
-                } else {
-                    otherClasses += classesCount;
-                    if (isAlive) {
-                        otherAlive++;
-                    } else {
-                        otherDead++;
-                    }
-                }
-            }
-
-            if (parsedLines == 0) {
-                log.warn("[{}] jmap -clstats parsed 0 data lines (exitCode={}, rawLines={}). Raw output (first 20):",
-                        label, exitCode, lines.size());
-                for (int i = 0; i < Math.min(lines.size(), 20); i++) {
+            if (r.parsedLines == 0 || r.bootstrapClasses == 0
+                    || r.otherClasses > 100000L
+                    || (r.subClAlive + r.subClDead == 0 && r.otherDead > 0)) {
+                log.warn("[{}] jmap -clstats suspicious result (parsedLines={}, exitCode={}, "
+                        + "rawLines={}, bootstrap={}, other={}, subClDead={}). Raw output (first 30):",
+                        label, r.parsedLines, exitCode, lines.size(),
+                        r.bootstrapClasses, r.otherClasses, r.subClDead);
+                for (int i = 0; i < Math.min(lines.size(), 30); i++) {
                     log.warn("[{}]   [{}] {}", label, i, lines.get(i));
                 }
             }
-
-            log.info("[{}] ========== ClassLoader Stats (jmap -clstats) ==========", label);
-            log.info("[{}]   <bootstrap>                {} classes  live", label, bootstrapClasses);
-            log.info("[{}]   AppClassLoader             {} classes  live", label, appClasses);
-            log.info("[{}]   SeaTunnelChildFirstCL      {} classes  (alive={}, dead={})",
-                    label, subClTotalClasses, subClAlive, subClDead);
-            log.info("[{}]   other CLs                  {} classes  (alive={}, dead={})",
-                    label, otherClasses, otherAlive, otherDead);
-            final long retainedFromSystem = bootstrapClasses + appClasses;
-            log.info("[{}]   retained from bootstrap+AppCL: {} (sub CL classes: {})",
-                    label, retainedFromSystem, subClTotalClasses);
-            log.info("[{}] ===========================================================", label);
+            return r;
         } catch (Exception e) {
-            log.warn("[{}] Failed to dump ClassLoader stats in container {}: {}",
+            log.warn("[{}] Failed to capture ClassLoader stats in container {}: {}",
                     label, containerName, e.getMessage());
+            return new ClassLoaderStatsResult();
         }
+    }
+
+    private void dumpClassLoaderStats(String containerName, String label,
+                                      ClassLoaderStatsResult baseline) {
+        final ClassLoaderStatsResult r = captureClassLoaderStats(containerName, label);
+
+        log.info("[{}] ========== ClassLoader Stats (jmap -clstats) ==========", label);
+        log.info("[{}]   <bootstrap>                {} classes  live", label, r.bootstrapClasses);
+        log.info("[{}]   AppClassLoader             {} classes  live", label, r.appClasses);
+        log.info("[{}]   SeaTunnelChildFirstCL      {} classes  (alive={}, dead={})",
+                label, r.subClTotalClasses, r.subClAlive, r.subClDead);
+        log.info("[{}]   other CLs                  {} classes  (alive={}, dead={})",
+                label, r.otherClasses, r.otherAlive, r.otherDead);
+        final long retainedFromSystem = r.bootstrapClasses + r.appClasses;
+        log.info("[{}]   retained from bootstrap+AppCL: {} (sub CL classes: {})",
+                label, retainedFromSystem, r.subClTotalClasses);
+
+        if (baseline != null) {
+            log.info("[{}]   ----- Delta from baseline -----", label);
+            log.info("[{}]   <bootstrap>    delta: {} classes", label, r.bootstrapClasses - baseline.bootstrapClasses);
+            log.info("[{}]   AppClassLoader  delta: {} classes", label, r.appClasses - baseline.appClasses);
+            log.info("[{}]   SeaTunnelChildFirstCL  delta: {} classes (alive {} -> {}, dead {} -> {})",
+                    label, r.subClTotalClasses - baseline.subClTotalClasses,
+                    baseline.subClAlive, r.subClAlive, baseline.subClDead, r.subClDead);
+            log.info("[{}]   other CLs      delta: {} classes (alive {} -> {}, dead {} -> {})",
+                    label, r.otherClasses - baseline.otherClasses,
+                    baseline.otherAlive, r.otherAlive, baseline.otherDead, r.otherDead);
+        }
+        log.info("[{}] ===========================================================", label);
     }
 
     private static final Pattern HEAP_INFO_METASPACE_PATTERN =
@@ -1340,5 +1319,100 @@ class MetaspaceLeakIT {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * {@code jmap -clstats} 解析结果，供 {@link #parseClassLoaderStats(List)} 返回。
+     */
+    static final class ClassLoaderStatsResult {
+        long bootstrapClasses;
+        long appClasses;
+        long subClTotalClasses;
+        int subClAlive;
+        int subClDead;
+        long otherClasses;
+        int otherAlive;
+        int otherDead;
+        int parsedLines;
+    }
+
+    /**
+     * 解析 {@code jmap -clstats} 输出行列表，按 ClassLoader 类型分组统计。
+     * <p>
+     * 提取为 static 方法以便离线单元测试：用本地 {@code jmap} 真实输出或
+     * 构造的格式变体直接验证解析逻辑，无需 Docker/CI。
+     *
+     * @param lines {@code jmap -clstats} 的原始输出行（stdout+stderr 混合）
+     * @return 解析结果
+     */
+    static ClassLoaderStatsResult parseClassLoaderStats(List<String> lines) {
+        final ClassLoaderStatsResult r = new ClassLoaderStatsResult();
+        for (String line : lines) {
+            if (line == null || line.isEmpty() || line.startsWith("class_loader")
+                    || line.contains("total") || line.startsWith("finding")
+                    || line.startsWith("computing") || line.startsWith("please")
+                    || line.startsWith("Attaching") || line.startsWith("Debugger")
+                    || line.startsWith("Server compiler") || line.startsWith("JVM version")) {
+                continue;
+            }
+            String[] cols = line.split("\\t");
+            if (cols.length < 5) {
+                cols = line.split("\\s+");
+            }
+            if (cols.length < 5) {
+                continue;
+            }
+            final String clRef = cols[0].trim();
+            final long classesCount;
+            try {
+                classesCount = Long.parseLong(cols[1].trim());
+            } catch (NumberFormatException nfe) {
+                continue;
+            }
+            final String aliveStatus = cols[4].trim();
+            final boolean isAlive = "live".equalsIgnoreCase(aliveStatus);
+            final String typeStr = cols.length > 5 ? cols[5].trim() : "";
+            r.parsedLines++;
+
+            final boolean isBootstrap = "<bootstrap>".equals(clRef)
+                    || "<bootstrap>".equals(typeStr)
+                    || typeStr.contains("bootstrap")
+                    || typeStr.contains("<internal>")
+                    || "null".equals(clRef)
+                    || clRef.matches("0x0+");
+            final boolean isSeaTunnelChild = typeStr.contains("SeaTunnelChildFirstClassLoader")
+                    || line.contains("SeaTunnelChildFirstClassLoader");
+            final boolean isAppClassLoader = typeStr.contains("AppClassLoader")
+                    && !typeStr.contains("ExtClassLoader");
+            final boolean isExtClassLoader = typeStr.contains("ExtClassLoader");
+
+            if (isBootstrap) {
+                r.bootstrapClasses = classesCount;
+            } else if (isSeaTunnelChild) {
+                r.subClTotalClasses += classesCount;
+                if (isAlive) {
+                    r.subClAlive++;
+                } else {
+                    r.subClDead++;
+                }
+            } else if (isAppClassLoader) {
+                r.appClasses = classesCount;
+            } else if (isExtClassLoader) {
+                r.otherClasses += classesCount;
+                if (isAlive) {
+                    r.otherAlive++;
+                } else {
+                    r.otherDead++;
+                }
+            } else {
+                r.otherClasses += classesCount;
+                if (isAlive) {
+                    r.otherAlive++;
+                } else {
+                    r.otherDead++;
+                }
+            }
+        }
+        return r;
     }
 }
