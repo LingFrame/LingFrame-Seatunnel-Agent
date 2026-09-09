@@ -791,7 +791,8 @@ class MetaspaceLeakIT {
                     lines.add(line);
                 }
             }
-            p.waitFor(30, TimeUnit.SECONDS);
+            final boolean exited = p.waitFor(30, TimeUnit.SECONDS);
+            final int exitCode = exited ? p.exitValue() : -1;
 
             long bootstrapClasses = 0;
             long appClasses = 0;
@@ -801,6 +802,7 @@ class MetaspaceLeakIT {
             long otherClasses = 0;
             int otherAlive = 0;
             int otherDead = 0;
+            int parsedLines = 0;
 
             for (String line : lines) {
                 if (line == null || line.isEmpty() || line.startsWith("class_loader")
@@ -810,7 +812,10 @@ class MetaspaceLeakIT {
                         || line.startsWith("Server compiler") || line.startsWith("JVM version")) {
                     continue;
                 }
-                final String[] cols = line.split("\\t");
+                String[] cols = line.split("\\t");
+                if (cols.length < 5) {
+                    cols = line.split("\\s+");
+                }
                 if (cols.length < 5) {
                     continue;
                 }
@@ -824,6 +829,7 @@ class MetaspaceLeakIT {
                 final String aliveStatus = cols[4].trim();
                 final boolean isAlive = "live".equalsIgnoreCase(aliveStatus);
                 final String typeStr = cols.length > 5 ? cols[5].trim() : "";
+                parsedLines++;
 
                 if ("<bootstrap>".equals(clRef)) {
                     bootstrapClasses = classesCount;
@@ -850,6 +856,14 @@ class MetaspaceLeakIT {
                     } else {
                         otherDead++;
                     }
+                }
+            }
+
+            if (parsedLines == 0) {
+                log.warn("[{}] jmap -clstats parsed 0 data lines (exitCode={}, rawLines={}). Raw output (first 20):",
+                        label, exitCode, lines.size());
+                for (int i = 0; i < Math.min(lines.size(), 20); i++) {
+                    log.warn("[{}]   [{}] {}", label, i, lines.get(i));
                 }
             }
 

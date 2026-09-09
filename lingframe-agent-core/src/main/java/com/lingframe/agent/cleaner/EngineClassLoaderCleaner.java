@@ -343,6 +343,11 @@ public final class EngineClassLoaderCleaner {
      * 排除 {@code IMAP_FINISHED_JOB_STATE}（名称含 {@code finished-job-state}）：该 IMap
      * 存储的是 {@code JobStatus} 枚举值，不持有 ClassLoader 或领域对象引用，删除它无助于
      * ClassLoader 回收，但会破坏 REST API {@code getJobInfoJson} 对已完成作业的状态查询。
+     * <p>
+     * 排除 {@code running-job} IMap：该 IMap 由引擎 {@code JobMaster.cleanJob()} 自行管理
+     * （job FINISHED 后从中移除并转入 finished-job-state）。Agent 在 {@code cleanFinishedJobMasters}
+     * 中提前删除该条目会导致 REST API {@code GET /running-job/{jobId}} 返回无 jobStatus，
+     * 因为删除发生在引擎更新 FINISHED 状态之前。
      *
      * @param jobId 作业标识
      */
@@ -365,6 +370,7 @@ public final class EngineClassLoaderCleaner {
                     if (obj instanceof IMap) {
                         final String name = obj.getName();
                         if (name != null && !name.contains("finished-job-state")
+                                && !name.equals("running-job")
                                 && (name.contains("job") || name.contains("checkpoint")
                                     || name.contains("engine") || name.contains("running"))) {
                             try {
