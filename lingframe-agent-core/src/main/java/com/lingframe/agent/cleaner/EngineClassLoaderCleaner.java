@@ -205,7 +205,14 @@ public final class EngineClassLoaderCleaner {
                         cleaned, total);
             }
             // 联动强制排空已完成作业在 DefaultClassLoaderService 中可能异常残留的 ClassLoader 缓存
+            // 注意：finishedExecutionContexts 是任务级完成，job 可能仍在 RUNNING。
+            // 跳过仍在 runningJobMasterMap 中的活跃作业，避免 ClassLoader 释放与
+            // 任务完成通知竞态导致 job 永远卡在 RUNNING（CI flaky root cause）。
+            final Set<Long> activeJobIds = collectActiveJobIds();
             for (Long jobId : completedJobIds) {
+                if (activeJobIds != null && activeJobIds.contains(jobId)) {
+                    continue;
+                }
                 forceEvictJobClassLoaders(jobId);
             }
 
@@ -223,7 +230,12 @@ public final class EngineClassLoaderCleaner {
             cleanStaleExecutionContexts(target, completedJobIds);
 
             // 对 executionContexts 清理新增的 completedJobIds 联动 forceEvict
+            // cleanStaleExecutionContexts 内部已用 activeJobIds 过滤，新增的 jobId 保证非活跃。
+            // 但原始 completedJobIds 仍含 finishedExecutionContexts 的任务级完成 ID，需再次过滤。
             for (Long jobId : completedJobIds) {
+                if (activeJobIds != null && activeJobIds.contains(jobId)) {
+                    continue;
+                }
                 forceEvictJobClassLoaders(jobId);
             }
 
