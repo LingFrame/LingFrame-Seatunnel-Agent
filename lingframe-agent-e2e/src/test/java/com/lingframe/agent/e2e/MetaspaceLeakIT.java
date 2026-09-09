@@ -240,7 +240,7 @@ class MetaspaceLeakIT {
         final boolean hasLeakEvidence = agentResult.getRetainedClasses() > 0
                 || agentResult.getClassLoaderCount() > 0;
         if (hasLeakEvidence) {
-            log.warn("Leak evidence: retained={} classes, SeaTunnelCL={} instances."
+            log.info("Leak evidence: retained={} classes, SeaTunnelCL={} instances."
                     + " Generating heap dump for MAT analysis.",
                     agentResult.getRetainedClasses(),
                     agentResult.getClassLoaderCount());
@@ -907,11 +907,11 @@ class MetaspaceLeakIT {
 
             // suspicious 条件：parsedLines=0 或 bootstrap=0 表示解析完全失败；
             // otherClasses>100000 表示数据异常；otherDead>100 表示大量死 CL 可疑。
-            // 去掉 subCl==0 && otherDead>0 条件：对照组无 SeaTunnelChildFirstCL
-            // 但有少量 dead DelegatingClassLoader 属正常，不应触发 suspicious。
+            // suspicious 条件：parsedLines=0 或 bootstrap=0 表示解析完全失败；
+            // otherClasses>100000 表示数据异常。
+            // otherDead 不作为条件：大量 dead DelegatingClassLoader 在两组都属正常。
             if (r.parsedLines == 0 || r.bootstrapClasses == 0
-                    || r.otherClasses > 100000L
-                    || r.otherDead > 100) {
+                    || r.otherClasses > 100000L) {
                 log.warn("[{}] jmap -clstats suspicious result (parsedLines={}, exitCode={}, "
                         + "rawLines={}, bootstrap={}, other={}, otherDead={}). Raw output (first 30):",
                         label, r.parsedLines, exitCode, lines.size(),

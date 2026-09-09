@@ -84,6 +84,12 @@ public final class EngineClassLoaderCleaner {
     /** 登记跟踪每个作业所使用过的全部 ClassLoader 集合（作业终态物理卸载源头） */
     private static final ConcurrentMap<Long, Set<ClassLoader>> JOB_CLASS_LOADERS = new ConcurrentHashMap<>();
 
+    /** 作业进入 finished-job-state IMap 的首次时间戳，用于延迟 ClassLoader 释放 */
+    private static final ConcurrentMap<Long, Long> FINISHED_JOB_FIRST_SEEN = new ConcurrentHashMap<>();
+
+    /** 作业完成后延迟释放 ClassLoader 的时间窗口（毫秒），给 REST API 查询留出时间 */
+    private static final long FINISHED_JOB_DEFERRAL_MS = 5000L;
+
     /**
      * 登记指定作业所加载/使用的 ClassLoader。
      *
@@ -429,13 +435,66 @@ public final class EngineClassLoaderCleaner {
             log.info("isJobInRunningJobIMap: job {} not in any running-job IMap, "
                     + "ClassLoader release proceeds", jobId);
         } catch (Throwable t) {
-            log.info("isJobInRunningJobIMap: check failed for job {}: {}", jobId, t.getMessage());
+            log.info("isJobInRunningJobIMap: check failed for job {}: {}",
+                    jobId, t.getMessage());
         }
         return false;
     }
 
     /**
+     * 检查作业是否刚进入 finished-job-state IMap（在延迟窗口内）。
+     * <p>
+     * CI 实测：job FINISHED 后引擎立即从 running-job 移除并转入 finished-job-state，
+     * {@code isJobInRunningJobIMap} 永远返回 false，延迟释放从未生效。
+     * 此方法检查 finished-job-state IMap，若作业在 {@link #FINISHED_JOB_DEFERRAL_MS}
+     * 窗口内首次出现，延迟 ClassLoader 释放，给 REST API 查询留出时间。
+     * 超过窗口后放行释放，避免 finished-job-state 永驻致 ClassLoader 泄漏。
+     */
+    private static boolean isJobRecentlyFinished(long jobId) {
+        try {
+            final Collection<HazelcastInstance> instances = Hazelcast.getAllHazelcastInstances();
+            if (instances == null || instances.isEmpty()) {
+                return false;
+            }
+            final Long boxedJobId = jobId;
+            for (HazelcastInstance hz : instances) {
+                if (hz == null) {
+                    continue;
+                }
+                try {
+                    final IMap<Object, Object> finishedMap = hz.getMap("finished-job-state");
+                    if (finishedMap.containsKey(boxedJobId)) {
+                        final long now = System.currentTimeMillis();
+                        Long firstSeen = FINISHED_JOB_FIRST_SEEN.get(jobId);
+                        if (firstSeen == null) {
+                            firstSeen = now;
+                            FINISHED_JOB_FIRST_SEEN.put(jobId, firstSeen);
+                        }
+                        final long elapsed = now - firstSeen;
+                        if (elapsed < FINISHED_JOB_DEFERRAL_MS) {
+                            log.info("isJobRecentlyFinished: job {} in finished-job-state, "
+                                    + "{}ms since first seen (defer {}ms), delaying release",
+                                    jobId, elapsed, FINISHED_JOB_DEFERRAL_MS - elapsed);
+                            return true;
+                        }
+                        log.info("isJobRecentlyFinished: job {} in finished-job-state, "
+                                + "{}ms since first seen (exceeded {}ms), release proceeds",
+                                jobId, elapsed, FINISHED_JOB_DEFERRAL_MS);
+                        return false;
+                    }
+                } catch (Throwable t) {
+                    log.info("isJobRecentlyFinished: check skipped for job {}: {}",
+                            jobId, t.getMessage());
+                }
+            }
+        } catch (Throwable t) {
+            log.info("isJobRecentlyFinished: check failed for job {}: {}",
+                    jobId, t.getMessage());
+        }
+        return false;
+    }
 
+    /**
      * 针对指定作业，强制从 {@code DefaultClassLoaderService.classLoaderCache} 中剥离残留项。
      * <p>
      * 防御场景：若作业在 Coordinator 端（DAG 解析/物理计划构建）或 Worker 调度执行中发生未捕获异常、
@@ -449,9 +508,10 @@ public final class EngineClassLoaderCleaner {
         if (jobId <= 0) {
             return;
         }
-        if (isJobInRunningJobIMap(jobId)) {
-            log.info("forceEvictJobClassLoaders deferred for job {}: running-job IMap entry still exists, "
-                    + "delaying ClassLoader release to preserve REST API serialization integrity.", jobId);
+        if (isJobInRunningJobIMap(jobId) || isJobRecentlyFinished(jobId)) {
+            log.info("forceEvictJobClassLoaders deferred for job {}: "
+                    + "job still in IMap or recently finished, "
+                    + "delaying release to preserve REST API serialization.", jobId);
             return;
         }
         final Set<ClassLoader> toRelease = new HashSet<>();
