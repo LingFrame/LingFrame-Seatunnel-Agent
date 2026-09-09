@@ -1,9 +1,6 @@
 package com.lingframe.agent.cleaner;
 
-import com.hazelcast.core.DistributedObject;
-import com.hazelcast.core.Hazelcast;
-import com.hazelcast.core.HazelcastInstance;
-import com.hazelcast.map.IMap;
+
 import com.lingframe.agent.bridge.LingFrameAgentBridge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,7 +15,7 @@ import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.sql.Driver;
 import java.sql.DriverManager;
-import java.util.Collection;
+
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashSet;
@@ -84,11 +81,6 @@ public final class EngineClassLoaderCleaner {
     /** 登记跟踪每个作业所使用过的全部 ClassLoader 集合（作业终态物理卸载源头） */
     private static final ConcurrentMap<Long, Set<ClassLoader>> JOB_CLASS_LOADERS = new ConcurrentHashMap<>();
 
-    /** 作业进入 finished-job-state IMap 的首次时间戳，用于延迟 ClassLoader 释放 */
-    private static final ConcurrentMap<Long, Long> FINISHED_JOB_FIRST_SEEN = new ConcurrentHashMap<>();
-
-    /** 作业完成后延迟释放 ClassLoader 的时间窗口（毫秒），给 REST API 查询留出时间 */
-    private static final long FINISHED_JOB_DEFERRAL_MS = 5000L;
 
     /**
      * 登记指定作业所加载/使用的 ClassLoader。
@@ -331,10 +323,6 @@ public final class EngineClassLoaderCleaner {
             fieldsCleared += nullifyField(jobMaster, "jobImmutableInformation");
             fieldsCleared += nullifyField(jobMaster, "jobMasterCompleteFuture");
 
-            // 排空 Hazelcast 分布式 Map 中的 Job 状态与领域对象，彻底切断集群常驻 GC Root
-            if (jobId > 0) {
-                cleanHazelcastJobState(jobId);
-            }
 
             log.info("EngineClassLoaderCleaner severed Coordinator GC roots for JobMaster {} ({} fields cleared)",
                     jobId, fieldsCleared);
@@ -344,157 +332,8 @@ public final class EngineClassLoaderCleaner {
     }
 
     /**
-     * 排空 Hazelcast 分布式 Map 中对应作业的领域对象，彻底斩断集群常驻 GC Roots。
-     * <p>
-     * 排除 {@code IMAP_FINISHED_JOB_STATE}（名称含 {@code finished-job-state}）：该 IMap
-     * 存储的是 {@code JobStatus} 枚举值，不持有 ClassLoader 或领域对象引用，删除它无助于
-     * ClassLoader 回收，但会破坏 REST API {@code getJobInfoJson} 对已完成作业的状态查询。
-     * <p>
-     * 排除 {@code running-job} IMap：该 IMap 由引擎 {@code JobMaster.cleanJob()} 自行管理
-     * （job FINISHED 后从中移除并转入 finished-job-state）。Agent 在 {@code cleanFinishedJobMasters}
-     * 中提前删除该条目会导致 REST API {@code GET /running-job/{jobId}} 返回无 jobStatus，
-     * 因为删除发生在引擎更新 FINISHED 状态之前。
-     *
-     * @param jobId 作业标识
-     */
-    public static void cleanHazelcastJobState(long jobId) {
-        if (jobId <= 0) {
-            return;
-        }
-        try {
-            final Collection<HazelcastInstance> instances = Hazelcast.getAllHazelcastInstances();
-            if (instances == null || instances.isEmpty()) {
-                return;
-            }
-            final Long boxedJobId = jobId;
-            final String strJobId = String.valueOf(jobId);
-            for (HazelcastInstance hz : instances) {
-                if (hz == null) {
-                    continue;
-                }
-                for (DistributedObject obj : hz.getDistributedObjects()) {
-                    if (obj instanceof IMap) {
-                        final String name = obj.getName();
-                        if (name != null && !name.contains("finished-job-state")
-                                && !name.equals("running-job")
-                                && (name.contains("job") || name.contains("checkpoint")
-                                    || name.contains("engine") || name.contains("running"))) {
-                            try {
-                                final IMap<?, ?> map = (IMap<?, ?>) obj;
-                                map.remove(boxedJobId);
-                                map.remove(strJobId);
-                            } catch (Throwable t2) {
-                                log.debug("Hazelcast distributed map eviction skipped for job {}: {}", jobId, t2.getMessage());
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            log.debug("Hazelcast job state eviction skipped: {}", t.getMessage());
-        }
-    }
 
-    /**
-     * 检查 {@code running-job} IMap 中是否仍存在指定作业的条目。
-     * <p>
-     * {@code forceEvictJobClassLoaders} 在释放 ClassLoader 前调用此方法：
-     * 若 {@code running-job} IMap 中条目仍在，说明引擎尚未完成 {@code JobMaster.cleanJob()}
-     * 对该条目的移除。此时释放 ClassLoader 会导致 Hazelcast 序列化 {@code JobInfo} 时
-     * jobStatus 字段丢失（类已卸载），REST API 返回 {@code {"jobId":"xxx"}} 无 jobStatus。
-     * 延迟到引擎移除 {@code running-job} 条目后再释放，保证 REST API 正常工作。
-     *
-     * @param jobId 作业标识
-     * @return {@code true} 若 {@code running-job} IMap 中仍有该 jobId 条目
-     */
-    private static boolean isJobInRunningJobIMap(long jobId) {
-        try {
-            final Collection<HazelcastInstance> instances = Hazelcast.getAllHazelcastInstances();
-            if (instances == null || instances.isEmpty()) {
-                log.info("isJobInRunningJobIMap: no Hazelcast instances for job {}, "
-                        + "check returns false (ClassLoader release proceeds)", jobId);
-                return false;
-            }
-            final Long boxedJobId = jobId;
-            for (HazelcastInstance hz : instances) {
-                if (hz == null) {
-                    continue;
-                }
-                try {
-                    final IMap<Object, Object> runningJobMap = hz.getMap("running-job");
-                    if (runningJobMap.containsKey(boxedJobId)) {
-                        log.info("isJobInRunningJobIMap: job {} still in running-job IMap, "
-                                + "deferring ClassLoader release", jobId);
-                        return true;
-                    }
-                } catch (Throwable t) {
-                    log.info("isJobInRunningJobIMap: IMap check skipped for job {}: {}",
-                            jobId, t.getMessage());
-                }
-            }
-            log.info("isJobInRunningJobIMap: job {} not in any running-job IMap, "
-                    + "ClassLoader release proceeds", jobId);
-        } catch (Throwable t) {
-            log.info("isJobInRunningJobIMap: check failed for job {}: {}",
-                    jobId, t.getMessage());
-        }
-        return false;
-    }
 
-    /**
-     * 检查作业是否刚进入 finished-job-state IMap（在延迟窗口内）。
-     * <p>
-     * CI 实测：job FINISHED 后引擎立即从 running-job 移除并转入 finished-job-state，
-     * {@code isJobInRunningJobIMap} 永远返回 false，延迟释放从未生效。
-     * 此方法检查 finished-job-state IMap，若作业在 {@link #FINISHED_JOB_DEFERRAL_MS}
-     * 窗口内首次出现，延迟 ClassLoader 释放，给 REST API 查询留出时间。
-     * 超过窗口后放行释放，避免 finished-job-state 永驻致 ClassLoader 泄漏。
-     */
-    private static boolean isJobRecentlyFinished(long jobId) {
-        try {
-            final Collection<HazelcastInstance> instances = Hazelcast.getAllHazelcastInstances();
-            if (instances == null || instances.isEmpty()) {
-                return false;
-            }
-            final Long boxedJobId = jobId;
-            for (HazelcastInstance hz : instances) {
-                if (hz == null) {
-                    continue;
-                }
-                try {
-                    final IMap<Object, Object> finishedMap = hz.getMap("finished-job-state");
-                    if (finishedMap.containsKey(boxedJobId)) {
-                        final long now = System.currentTimeMillis();
-                        Long firstSeen = FINISHED_JOB_FIRST_SEEN.get(jobId);
-                        if (firstSeen == null) {
-                            firstSeen = now;
-                            FINISHED_JOB_FIRST_SEEN.put(jobId, firstSeen);
-                        }
-                        final long elapsed = now - firstSeen;
-                        if (elapsed < FINISHED_JOB_DEFERRAL_MS) {
-                            log.info("isJobRecentlyFinished: job {} in finished-job-state, "
-                                    + "{}ms since first seen (defer {}ms), delaying release",
-                                    jobId, elapsed, FINISHED_JOB_DEFERRAL_MS - elapsed);
-                            return true;
-                        }
-                        log.info("isJobRecentlyFinished: job {} in finished-job-state, "
-                                + "{}ms since first seen (exceeded {}ms), release proceeds",
-                                jobId, elapsed, FINISHED_JOB_DEFERRAL_MS);
-                        return false;
-                    }
-                } catch (Throwable t) {
-                    log.info("isJobRecentlyFinished: check skipped for job {}: {}",
-                            jobId, t.getMessage());
-                }
-            }
-        } catch (Throwable t) {
-            log.info("isJobRecentlyFinished: check failed for job {}: {}",
-                    jobId, t.getMessage());
-        }
-        return false;
-    }
-
-    /**
      * 针对指定作业，强制从 {@code DefaultClassLoaderService.classLoaderCache} 中剥离残留项。
      * <p>
      * 防御场景：若作业在 Coordinator 端（DAG 解析/物理计划构建）或 Worker 调度执行中发生未捕获异常、
@@ -508,12 +347,7 @@ public final class EngineClassLoaderCleaner {
         if (jobId <= 0) {
             return;
         }
-        if (isJobInRunningJobIMap(jobId) || isJobRecentlyFinished(jobId)) {
-            log.info("forceEvictJobClassLoaders deferred for job {}: "
-                    + "job still in IMap or recently finished, "
-                    + "delaying release to preserve REST API serialization.", jobId);
-            return;
-        }
+
         final Set<ClassLoader> toRelease = new HashSet<>();
         final Set<ClassLoader> tracked = JOB_CLASS_LOADERS.remove(jobId);
         if (tracked != null) {
