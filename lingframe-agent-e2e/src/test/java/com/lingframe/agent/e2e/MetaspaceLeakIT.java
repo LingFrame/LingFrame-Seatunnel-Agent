@@ -59,8 +59,7 @@ class MetaspaceLeakIT {
 
     static final class MetaspaceAuditResult {
         private final long baseline;
-        private final long round1;
-        private final long round2;
+        private final List<Long> roundUsed;
         private final long finalUsed;
         private final long netGrowth;
         private final long loadedDelta;
@@ -70,13 +69,12 @@ class MetaspaceLeakIT {
         private final ClassLoaderStatsResult baselineClStats;
         private final ClassLoaderStatsResult preGcClStats;
 
-        MetaspaceAuditResult(long baseline, long round1, long round2, long finalUsed,
+        MetaspaceAuditResult(long baseline, List<Long> roundUsed, long finalUsed,
                              long loadedDelta, long unloadedDelta, long retainedClasses,
                              long classLoaderCount, ClassLoaderStatsResult baselineClStats,
                              ClassLoaderStatsResult preGcClStats) {
             this.baseline = baseline;
-            this.round1 = round1;
-            this.round2 = round2;
+            this.roundUsed = roundUsed;
             this.finalUsed = finalUsed;
             this.netGrowth = finalUsed - baseline;
             this.loadedDelta = loadedDelta;
@@ -91,12 +89,8 @@ class MetaspaceLeakIT {
             return baseline;
         }
 
-        public long getRound1() {
-            return round1;
-        }
-
-        public long getRound2() {
-            return round2;
+        public List<Long> getRoundUsed() {
+            return roundUsed;
         }
 
         public long getFinalUsed() {
@@ -177,14 +171,15 @@ class MetaspaceLeakIT {
                 formatMb(nativeResult.getBaseline()),
                 formatMb(agentResult.getBaseline()),
                 formatMb(agentResult.getBaseline() - nativeResult.getBaseline())));
-        log.info("{}", reportRow("Round 1",
-                formatMb(nativeResult.getRound1()),
-                formatMb(agentResult.getRound1()),
-                formatMb(agentResult.getRound1() - nativeResult.getRound1())));
-        log.info("{}", reportRow("Round 2",
-                formatMb(nativeResult.getRound2()),
-                formatMb(agentResult.getRound2()),
-                formatMb(agentResult.getRound2() - nativeResult.getRound2())));
+        final int roundCount = Math.min(nativeResult.getRoundUsed().size(), agentResult.getRoundUsed().size());
+        for (int r = 0; r < roundCount; r++) {
+            final long nativeRound = nativeResult.getRoundUsed().get(r);
+            final long agentRound = agentResult.getRoundUsed().get(r);
+            log.info("{}", reportRow("Round " + (r + 1),
+                    formatMb(nativeRound),
+                    formatMb(agentRound),
+                    formatMb(agentRound - nativeRound)));
+        }
         log.info("{}", reportRow("Final",
                 formatMb(nativeResult.getFinalUsed()),
                 formatMb(agentResult.getFinalUsed()),
@@ -318,11 +313,11 @@ class MetaspaceLeakIT {
         final long[] baselineClassCounts = captureClassCounts(containerName);
         final ClassLoaderStatsResult baselineClStats = captureClassLoaderStats(containerName, targetLabel + "-baseline");
 
-        // 2. 阶段一：执行 3×3 全正交 9 组作业矩阵（每组执行 2 轮）
-        long round1Used = 0L;
-        long round2Used = 0L;
+        // 2. 阶段一：执行 3×3 全正交 9 组作业矩阵（每组执行 serialRounds 轮）
+        final int serialRounds = Integer.getInteger("lingframe.test.serial.rounds", 2);
+        final List<Long> roundUsed = new ArrayList<>();
         final List<String> allJobIds = new ArrayList<>();
-        for (int round = 1; round <= 2; round++) {
+        for (int round = 1; round <= serialRounds; round++) {
             for (int i = 0; i < matrixJobs.size(); i++) {
                 final String jobConfig = matrixJobs.get(i);
                 final String jobTag = targetLabel + "-r" + round + "-j" + (i + 1);
@@ -332,20 +327,16 @@ class MetaspaceLeakIT {
             }
             forceFullGcInContainer(containerName);
             final long rUsed = getCurrentMetaspaceUsed(containerName);
-            if (round == 1) {
-                round1Used = rUsed;
-            } else {
-                round2Used = rUsed;
-            }
-            log.info("[{}] Metaspace progression [Matrix Round {}/2]: used={} bytes ({}), deltaFromBaseline={} bytes ({})",
-                    targetLabel, round, rUsed, formatMb(rUsed), rUsed - baseline, formatMb(rUsed - baseline));
+            roundUsed.add(rUsed);
+            log.info("[{}] Metaspace progression [Matrix Round {}/{}]: used={} bytes ({}), deltaFromBaseline={} bytes ({})",
+                    targetLabel, round, serialRounds, rUsed, formatMb(rUsed), rUsed - baseline, formatMb(rUsed - baseline));
         }
 
         // 3. 阶段二：多 Job 异构并发压测（4 线程并发交错提交不同异构作业）
         final ExecutorService executor = Executors.newFixedThreadPool(4);
         try {
             final List<CompletableFuture<String>> futures = new ArrayList<>();
-            final int concurrentRounds = 3;
+            final int concurrentRounds = Integer.getInteger("lingframe.test.concurrent.rounds", 3);
             for (int r = 0; r < concurrentRounds; r++) {
                 final int roundIndex = r;
                 for (int j = 0; j < matrixJobs.size(); j++) {
@@ -420,7 +411,7 @@ class MetaspaceLeakIT {
             unloadedDelta = finalClassCounts[1] - baselineClassCounts[1];
             retainedClasses = loadedDelta - unloadedDelta;
         }
-        return new MetaspaceAuditResult(baseline, round1Used, round2Used, finalUsed,
+        return new MetaspaceAuditResult(baseline, roundUsed, finalUsed,
                 loadedDelta, unloadedDelta, retainedClasses, classLoaderCount, baselineClStats,
                 preGcClStats);
     }

@@ -294,9 +294,68 @@ connector-mongodb（自带 mongodb-driver）连本地 `mongod --dbpath ... --por
 3. **90 job 逐一验证 FINISHED 终态**，排除"提交成功但执行崩溃"的假象。本轮 CI（run #34297752012）中 Native 组 45/45 通过 REST API 确认，Agent 组 44/45 回退到容器日志搜索（`cleanHazelcastJobState` 误删 `IMAP_FINISHED_JOB_STATE` 致 REST API 返回无 jobStatus）。该根因已于 2026-09-09 修复（`cleanHazelcastJobState` 排除名称含 `finished-job-state` 的 IMap），待下一轮 CI 验证 Agent 组恢复 REST API 直查。
 4. **测试耗时 191.3 秒**（含两组各 45 job 提交 + FINISHED 验证 + 三轮 Full GC + heap dump 生成）。
 
+### 6.2 CI 级 A/B 对比审计最终证据（2026-09-10 实测，CI run #34395305061，dev 分支）
+
+**本轮变更**：新增 pre-GC clstats 采样点（`jmap -clstats` 三节点：baseline / pre-GC / post-GC 原始数据）；修复 HTTP 500（`forceEvictJobClassLoaders` 延迟释放直至 `engine_runningJobInfo` IMap 条目被引擎清理）；修复 callback NPE（`cleanJobMaster` 不再 nullify `jobMasterCompleteFuture`）；CI 触发分支 `develop` → `dev`。
+
+**Metaspace A/B 审计报告**（CI 日志原文）：
+
+```
+==================== [Metaspace A/B Audit Report] ====================
+                       Native(Control)    Agent(Treatment)   Delta
+  Baseline             49.32 MB           56.67 MB           7.35 MB
+  Round 1              108.88 MB          68.78 MB           -40.10 MB
+  Round 2              156.53 MB          69.18 MB           -87.35 MB
+  Final                298.62 MB          70.25 MB           -228.37 MB
+  Growth               249.30 MB          13.58 MB           -235.72 MB
+------------------------------------------------------------------------
+  Loaded Delta         +41827             +42017             +190
+  Unloaded Delta       +34                +39557             +39523
+  Retained Classes     +41793             +2460              -39333
+  ST ClassLoaders      +240               +0                 -240
+========================================================================
+  Net Overhead (Agent - Native) : -235.72 MB
+  Growth Threshold (Agent)      : 15.00 MB
+  Overhead Threshold (Net)      : 2.00 MB
+========================================================================
+```
+
+**`jmap -clstats` 三节点原始数据**：
+
+| 采样点 | 组 | total | bootstrap | AppCL | SeaTunnelChildFirstCL | other |
+|---|---|---|---|---|---|---|
+| baseline | Agent | 9671 | 2846 (live) | 6650 (live) | 0 (alive=0, dead=0) | 175 (alive=0, dead=124) |
+| pre-GC | Agent | 12735 | 3090 (live) | 8013 (live) | 1233 (alive=0, dead=6) | 399 (alive=0, dead=348) |
+| post-GC | Agent | 11502 | 3090 (live) | 8013 (live) | 0 (alive=0, dead=0) | 399 (alive=0, dead=348) |
+| baseline | Native | 8159 | 2784 (live) | 5273 (live) | 0 (alive=0, dead=0) | 102 (alive=0, dead=50) |
+| pre-GC | Native | 41493 | 3022 (live) | 6649 (live) | 30544 (alive=0, dead=240) | 1278 (alive=0, dead=1226) |
+| post-GC | Native | 41499 | 3026 (live) | 6651 (live) | 30544 (alive=0, dead=240) | 1278 (alive=0, dead=1226) |
+
+**关键观察**：Agent pre-GC STCL=1233 → post-GC STCL=0（Full GC 卸载 1233 类，ClassLoader 回收触发类卸载）；Native pre-GC STCL=30544 → post-GC STCL=30544（Full GC 后零卸载，ClassLoader 拘留致类无法回收）。
+
+**关键指标解读**：
+
+| 指标 | Native(无 Agent) | Agent(有 Agent) | 判定 |
+|------|------------------|-----------------|------|
+| 作业 FINISHED | 45/45 | 45/45 | ✅ 正常完成 |
+| Metaspace Growth | 249.30 MB | 13.58 MB | ✅ Agent < 15MB 阈值 |
+| Retained Classes | +41793 | +2460 | ✅ Agent 类卸载率 94% |
+| ST ClassLoaders 拘留 | 240 | 0 | ✅ Agent ClassLoader 已回收 |
+| Net Overhead | — | -235.72 MB | ✅ 优于 2MB 阈值 |
+| HTTP 500 | 0 | 0 | ✅ 无序列化破坏 |
+| callback NPE | 0 | 0 | ✅ 无 callback 异常 |
+
+**核心结论**：
+
+1. **Agent 将 Native 的 249.30 MB Metaspace 增长降至 13.58 MB**（Net Overhead = -235.72 MB）。原生 SeaTunnel 在 `classloader-cache-mode: false` 下 45 job 后 240 个 `SeaTunnelChildFirstClassLoader` 拘留、41793 个类未卸载、Metaspace 增长 249.30 MB。
+2. **Agent 的 ClassLoader 清理机制将类卸载率从 0.08%（34/41827）提升至 94%（39557/42017）**，`SeaTunnelChildFirstClassLoader` 拘留数从 240 降至 0。
+3. **90 job 逐一验证 FINISHED 终态**，HTTP 500 = 0，callback NPE = 0——Agent 的 ClassLoader 清理不影响 SeaTunnel 引擎的正常行为（REST API 查询、状态管理、callback 执行）。
+4. **测试耗时 1035 秒**（含两组各 45 job 提交 + FINISHED 验证 + 三轮 Full GC + heap dump 生成）。
+
 ## 7. 结论与边界（诚实版）
 
 - ✅ **已证（本机矩阵级，2026-09-06）**：cacheMode=false 下卸载链路真实执行（60 次物理释放 / 15 job 日志实证）；source×sink 双维度矩阵 **8 组场景** 5 轮 75 job GC 后 Class Metaspace **收敛至零增长**（8.63 / 9.17 / 8.89 / 9.28 / 9.60 / 9.90 / 9.91 / 10.19 MB）；jdbc / redis / mongodb 三 connector 在 **source 与 sink 两种角色**下均无 Metaspace 泄漏，最强组合（MySQL→MySQL 双真实同 job）亦收敛——**机制与真实 connector 卸载验证通过**。
 - ✅ **已证（CI A/B 对比级，2026-09-09）**：`MetaspaceLeakIT` 90 job 全正交矩阵（Fake/MySQL/Kafka × Fake/MySQL/Kafka，含并发压测）A/B 对比——Agent 组 Metaspace 增长 **13.47 MB**（< 15MB 阈值），`SeaTunnelChildFirstClassLoader` 拦留 **0**，类卸载率 **94%**；Native 对照组 Metaspace 增长 **248.95 MB**，ClassLoader 拦留 **240**，类卸载率 **0.1%**。Net Overhead = **-235.48 MB**（Agent 反而比 Native 少 235.48 MB）。90 job 逐一验证 FINISHED 终态，排除崩溃假象。
+- ✅ **已证（CI A/B 对比级，2026-09-10）**：CI run #34395305061（dev 分支）——Agent 组 Metaspace 增长 **13.58 MB**（< 15MB 阈值），`SeaTunnelChildFirstClassLoader` 拦留 **0**，类卸载率 **94%**（39557/42017）；Native 对照组 Metaspace 增长 **249.30 MB**，ClassLoader 拦留 **240**，类卸载率 **0.08%**（34/41827）。Net Overhead = **-235.72 MB**。HTTP 500 = 0，callback NPE = 0。`jmap -clstats` 三节点证实 Agent pre-GC STCL=1233 → post-GC STCL=0（Full GC 卸载 1233 类），Native 30544 → 30544（零卸载）。Agent 的 ClassLoader 清理不影响 SeaTunnel 引擎正常行为。
 - ⚠️ **范围边界**：Kafka 消息类 connector 与 file-\* connector（Windows 缺 hadoop native）已在 CI `MetaspaceLeakIT` 中覆盖（Docker 环境）；本机验证仍限 fake/jdbc/redis/mongodb 矩阵。
 - 本验证耗时约 5 分钟/轮（引擎启动 ~40s + 15 job ~90s + GC ~10s），5 轮约 30 分钟；CI A/B 对比耗时 191.3 秒；环境前置见第 1、2 节。
