@@ -405,6 +405,8 @@ public final class EngineClassLoaderCleaner {
         try {
             final Collection<HazelcastInstance> instances = Hazelcast.getAllHazelcastInstances();
             if (instances == null || instances.isEmpty()) {
+                log.info("isJobInRunningJobIMap: no Hazelcast instances for job {}, "
+                        + "check returns false (ClassLoader release proceeds)", jobId);
                 return false;
             }
             final Long boxedJobId = jobId;
@@ -415,14 +417,19 @@ public final class EngineClassLoaderCleaner {
                 try {
                     final IMap<Object, Object> runningJobMap = hz.getMap("running-job");
                     if (runningJobMap.containsKey(boxedJobId)) {
+                        log.info("isJobInRunningJobIMap: job {} still in running-job IMap, "
+                                + "deferring ClassLoader release", jobId);
                         return true;
                     }
                 } catch (Throwable t) {
-                    log.debug("running-job IMap check skipped for job {}: {}", jobId, t.getMessage());
+                    log.info("isJobInRunningJobIMap: IMap check skipped for job {}: {}",
+                            jobId, t.getMessage());
                 }
             }
+            log.info("isJobInRunningJobIMap: job {} not in any running-job IMap, "
+                    + "ClassLoader release proceeds", jobId);
         } catch (Throwable t) {
-            log.debug("running-job IMap check failed for job {}: {}", jobId, t.getMessage());
+            log.info("isJobInRunningJobIMap: check failed for job {}: {}", jobId, t.getMessage());
         }
         return false;
     }
@@ -443,7 +450,7 @@ public final class EngineClassLoaderCleaner {
             return;
         }
         if (isJobInRunningJobIMap(jobId)) {
-            log.debug("forceEvictJobClassLoaders deferred for job {}: running-job IMap entry still exists, "
+            log.info("forceEvictJobClassLoaders deferred for job {}: running-job IMap entry still exists, "
                     + "delaying ClassLoader release to preserve REST API serialization integrity.", jobId);
             return;
         }

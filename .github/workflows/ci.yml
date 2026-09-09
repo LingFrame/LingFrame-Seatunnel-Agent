@@ -152,7 +152,9 @@ jobs:
         run: |
           TAG="${{ steps.get_version.outputs.version }}"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, skipping release."
+            echo "Tag $TAG already exists, deleting old tag and release for overwrite."
+            git push origin :refs/tags/"$TAG" || true
+            gh release delete "$TAG" --yes || true
             echo "exists=true" >> $GITHUB_OUTPUT
           else
             echo "Tag $TAG is new, will publish release."
@@ -160,19 +162,16 @@ jobs:
           fi
 
       - name: Download Agent Fat-Jar
-        if: steps.check_tag.outputs.exists == 'false'
         uses: actions/download-artifact@v4
         with:
           name: lingframe-seatunnel-agent.jar
           path: release-assets/
 
       - name: Prepare Standard Release Asset
-        if: steps.check_tag.outputs.exists == 'false'
         run: |
           cp release-assets/lingframe-seatunnel-agent.jar release-assets/${{ steps.get_version.outputs.asset_name }}
 
       - name: Create Release and Tag
-        if: steps.check_tag.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.get_version.outputs.version }}
