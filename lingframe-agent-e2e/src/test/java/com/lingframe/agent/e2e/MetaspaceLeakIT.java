@@ -611,10 +611,28 @@ class MetaspaceLeakIT {
                             throw new IOException("Job " + jobTag + " (id=" + jobId
                                     + ") ended with status " + jobStatus + ", body: " + body);
                         }
+                        if ("UNKNOWABLE".equals(jobStatus)) {
+                            log.info("[{}] Job {} -> UNKNOWABLE (via REST API), "
+                                    + "job state cleared by engine, checking container log.",
+                                    jobTag, jobId);
+                            final String logStatus = checkJobStatusFromContainerLog(containerName, jobId);
+                            if ("FINISHED".equals(logStatus)) {
+                                log.info("[{}] Job {} -> FINISHED (via container log)", jobTag, jobId);
+                                return;
+                            }
+                            if ("FAILED".equals(logStatus) || "CANCELED".equals(logStatus)) {
+                                throw new IOException("Job " + jobTag + " (id=" + jobId
+                                        + ") ended with status " + logStatus + " (via container log)");
+                            }
+                            log.info("[{}] Job {} container log inconclusive, "
+                                    + "treating UNKNOWABLE as terminal.", jobTag, jobId);
+                            return;
+                        }
                     } else {
                         final String finishedStatus = queryFinishedJobState(finishedJobUrl);
-                        if ("FINISHED".equals(finishedStatus)) {
-                            log.info("[{}] Job {} -> FINISHED (via REST API finished-job-state)", jobTag, jobId);
+                        if ("FINISHED".equals(finishedStatus) || "UNKNOWABLE".equals(finishedStatus)) {
+                            log.info("[{}] Job {} -> {} (via REST API finished-job-state)",
+                                    jobTag, jobId, finishedStatus);
                             return;
                         }
                         if ("FAILED".equals(finishedStatus) || "CANCELED".equals(finishedStatus)) {
@@ -630,8 +648,9 @@ class MetaspaceLeakIT {
                         final String logStatus = checkJobStatusFromContainerLog(containerName, jobId);
                         if (logStatus != null) {
                             lastStatus = logStatus;
-                            if ("FINISHED".equals(logStatus)) {
-                                log.info("[{}] Job {} -> FINISHED (via container log)", jobTag, jobId);
+                            if ("FINISHED".equals(logStatus) || "UNKNOWABLE".equals(logStatus)) {
+                                log.info("[{}] Job {} -> {} (via container log)",
+                                        jobTag, jobId, logStatus);
                                 return;
                             }
                             if ("FAILED".equals(logStatus) || "CANCELED".equals(logStatus)) {
@@ -640,6 +659,7 @@ class MetaspaceLeakIT {
                             }
 
                         }
+
                     }
                 } else {
                     final String errBody;

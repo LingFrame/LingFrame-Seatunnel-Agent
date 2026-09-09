@@ -81,6 +81,9 @@ public final class EngineClassLoaderCleaner {
     /** 登记跟踪每个作业所使用过的全部 ClassLoader 集合（作业终态物理卸载源头） */
     private static final ConcurrentMap<Long, Set<ClassLoader>> JOB_CLASS_LOADERS = new ConcurrentHashMap<>();
 
+    /** 已清理过 JobMaster 内部字段的作业 ID 集合，防止 cleanFinishedJobMasters 重复处理 */
+    private static final ConcurrentMap<Long, Boolean> CLEANED_JOB_MASTERS = new ConcurrentHashMap<>();
+
 
     /**
      * 登记指定作业所加载/使用的 ClassLoader。
@@ -281,6 +284,33 @@ public final class EngineClassLoaderCleaner {
             if (jobId > 0) {
 
                 forceEvictJobClassLoaders(jobId);
+            }
+
+            // 精准清理 TaskExecutionService 中属于当前 jobId 的 executionContexts 和 finishedExecutionContexts
+            // 斩断 TaskGroupContext → taskGroup → tasks → Task → Action → Class → ClassLoader 引用链
+            // 注意：不从 runningJobMasterMap 移除——由引擎 JobMaster.cleanJob() 负责
+            // （storeFinishedJobState 写入 finishedJobStateImap + removeJobIMap）
+            try {
+                final Object server = readFieldValue(jobMaster, "seaTunnelServer");
+                if (server != null) {
+                    final Method getCoordMethod = server.getClass().getMethod("getCoordinatorService");
+                    final Object coord = getCoordMethod.invoke(server);
+                    if (coord != null) {
+                        registerCoordinatorService(coord);
+                    }
+                    try {
+                        final Method getTesMethod = server.getClass().getMethod("getTaskExecutionService");
+                        final Object tes = getTesMethod.invoke(server);
+                        if (tes != null) {
+                            register(tes);
+                            cleanTaskExecutionContextsByJobId(tes, jobId);
+                        }
+                    } catch (Throwable t2) {
+                        log.debug("TaskExecutionService cleanup skipped for job {}: {}", jobId, t2.getMessage());
+                    }
+                }
+            } catch (Throwable t) {
+                log.debug("CoordinatorService capture skipped: {}", t.getMessage());
             }
 
             // 尝试捕获 CoordinatorService 并从 runningJobMasterMap 中移除
@@ -864,13 +894,13 @@ public final class EngineClassLoaderCleaner {
             if (runningMap instanceof Map) {
                 final Map<?, ?> map = (Map<?, ?>) runningMap;
                 if (!map.isEmpty()) {
-                    final Iterator<? extends Map.Entry<?, ?>> it = map.entrySet().iterator();
-                    while (it.hasNext()) {
-                        final Map.Entry<?, ?> entry = it.next();
+                    for (Map.Entry<?, ?> entry : map.entrySet()) {
                         final Object jm = entry.getValue();
                         if (jm != null && isJobMasterFinished(jm)) {
-                            cleanJobMaster(jm);
-                            it.remove();
+                            final Long jobId = extractJobIdFromJobMaster(jm);
+                            if (jobId > 0 && CLEANED_JOB_MASTERS.putIfAbsent(jobId, Boolean.TRUE) == null) {
+                                cleanJobMaster(jm);
+                            }
                         }
                     }
                 }
@@ -982,6 +1012,19 @@ public final class EngineClassLoaderCleaner {
             log.debug("Failed to determine JobMaster end state: {}", t.getMessage());
         }
         return false;
+    }
+
+    private static long extractJobIdFromJobMaster(Object jm) {
+        try {
+            final Method getJobIdMethod = jm.getClass().getMethod("getJobId");
+            final Object idObj = getJobIdMethod.invoke(jm);
+            if (idObj instanceof Number) {
+                return ((Number) idObj).longValue();
+            }
+        } catch (Throwable t) {
+            log.debug("Failed to extract jobId from JobMaster: {}", t.getMessage());
+        }
+        return -1L;
     }
 
     /**
