@@ -327,6 +327,10 @@ public final class EngineClassLoaderCleaner {
 
     /**
      * 排空 Hazelcast 分布式 Map 中对应作业的领域对象，彻底斩断集群常驻 GC Roots。
+     * <p>
+     * 排除 {@code IMAP_FINISHED_JOB_STATE}（名称含 {@code finished-job-state}）：该 IMap
+     * 存储的是 {@code JobStatus} 枚举值，不持有 ClassLoader 或领域对象引用，删除它无助于
+     * ClassLoader 回收，但会破坏 REST API {@code getJobInfoJson} 对已完成作业的状态查询。
      *
      * @param jobId 作业标识
      */
@@ -348,8 +352,9 @@ public final class EngineClassLoaderCleaner {
                 for (DistributedObject obj : hz.getDistributedObjects()) {
                     if (obj instanceof IMap) {
                         final String name = obj.getName();
-                        if (name != null && (name.contains("job") || name.contains("checkpoint")
-                                || name.contains("engine") || name.contains("running"))) {
+                        if (name != null && !name.contains("finished-job-state")
+                                && (name.contains("job") || name.contains("checkpoint")
+                                    || name.contains("engine") || name.contains("running"))) {
                             try {
                                 final IMap<?, ?> map = (IMap<?, ?>) obj;
                                 map.remove(boxedJobId);

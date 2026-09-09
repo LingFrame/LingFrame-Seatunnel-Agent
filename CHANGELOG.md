@@ -43,6 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `run-benchmark.sh` 收尾清理修复：暂存目录删除改用 git-bash 原生 `/tmp` 路径并吞掉安全删除层失败（此前沙箱把裸 `C:/...` 当相对路径拼接导致 trash 失败、遗留目录、退出码误报 1）
 - 清理 `lingframe-agent-e2e/pom.xml` 中未实际使用的 `testcontainers.version` 属性（E2E 用裸 `ProcessBuilder` 调 docker CLI，未引入 Testcontainers 依赖）
 - 仓库卫生：`.gitignore` 补全 `dependency-reduced-pom.xml` / `target-verify/`，并对已误跟踪的 `lingframe-agent-dist/dependency-reduced-pom.xml` 执行 `git rm --cached`（磁盘文件保留，后续不再进版本库）
+- **`MetaspaceLeakIT` A/B 对比审计完善（2026-09-09）**：
+  - **作业 FINISHED 验证**：`waitForJobFinished` 轮询 REST API 确认终态，API 返回无 jobStatus 时回退到容器日志搜索状态转换记录（`cleanHazelcastJobState` 误删 `IMAP_FINISHED_JOB_STATE` 致 REST API 返回 `{"jobId":"xxx"}` 无 jobStatus 字段，根因后续定位并修复，见下条）
+  - **对照组放开**：取消注释 `seatunnel-native` 容器与 A/B 对比断言，两组各跑 45 job 共 90 job；对照组跑完后 `resetKafkaTopics()` 清空 Kafka topics 确保公平
+  - **审计报告表格化**：`MetaspaceAuditResult` 增加 `loadedDelta`/`unloadedDelta`/`classLoaderCount` 字段，报告改为三列对齐表格（Native/Agent/Delta），含 Metaspace 各阶段 + 类加载/卸载/retained + `SeaTunnelChildFirstClassLoader` 存活实例数（`jmap -histo:live`，与 SeaTunnel 官方 E2E 一致）
+  - **`formatDelta` 负值修复**：负 delta 是有意义的（Agent 比 Native 少），不应显示 N/A；采样失败改用 `Long.MIN_VALUE` 表示，`formatDelta` 只对 `Long.MIN_VALUE` 返回 N/A
+  - **CI 实测结果**（run #34297752012）：Agent Metaspace growth 13.47MB < 15MB 阈值，ClassLoader 拦留 0，类卸载率 94%；Native 对照组 growth 248.95MB，ClassLoader 拦留 240，类卸载率 0.1%；Net Overhead = -235.48MB（Agent 反而比 Native 少 235.48MB）
+  - **`cleanHazelcastJobState` 排除 `IMAP_FINISHED_JOB_STATE`（2026-09-09）**：`EngineClassLoaderCleaner.cleanHazelcastJobState` 遍历 Hazelcast IMap 时对名称含 `job`/`checkpoint`/`engine`/`running` 的 Map 执行 `remove(jobId)`，但 `IMAP_FINISHED_JOB_STATE`（名称含 `finished-job-state`）存储的是 `JobStatus` 枚举值，不持有 ClassLoader 或领域对象引用——删除它无助于 ClassLoader 回收，却破坏 REST API `getJobInfoJson` 对已完成作业的状态查询（API 查不到 finished IMap 记录，返回 `{"jobId":"xxx"}` 无 jobStatus 字段）。修复：条件判断增加 `!name.contains("finished-job-state")` 排除项，保留已完成作业状态供 REST API 查询
+  - **`dumpClassLoaderStats` 按 ClassLoader 分组打印类统计（2026-09-09）**：审计报告末尾新增 `jmap -clstats` 诊断，按 CL 类型分组输出各类 ClassLoader 的存活类数与 alive/dead 状态——证明 retained classes 来自 `<bootstrap>` + `AppClassLoader`（live），而非 `SeaTunnelChildFirstClassLoader`（dead，0 classes）。选用 `jmap -clstats` 而非 `-XX:+TraceClassUnloading` 的原因：实证发现 Corretto JDK 8.0.442 上 `-XX:+TraceClassUnloading` / `-verbose:class` 均不产出卸载 trace（flag 存在但无输出），`jmap -clstats` 在 JDK 8 上原生可用且直接给出按 CL 分组的 alive/dead 状态
 
 ### Removed
 - `TaskDeployAdvice`（`deployLocalTask` 拦截）：已由 `TaskExecutionAdvice`（`AbstractTask.call()` 批次调度治理）替代

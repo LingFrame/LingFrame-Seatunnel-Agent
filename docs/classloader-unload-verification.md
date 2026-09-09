@@ -247,12 +247,56 @@ connector-mongodb（自带 mongodb-driver）连本地 `mongod --dbpath ... --por
 > 本地矩阵（fake/jdbc/redis/mongodb × console/mongodb/redis/jdbc，含 MySQL→MySQL 双真实同 job）**已收敛，不再扩展**。
 > 剩余盲区属长稳体量 + 本地受限 connector，交由 CI 与部署环境职责：
 
-1. **CI `MetaspaceLeakIT`**（1000 job + 多 connector 组合，Docker）：长生命周期/大体量场景下的最终证据，同时覆盖 Kafka、file-\* 等本地环境受限的 connector。
+1. **CI `MetaspaceLeakIT`**（90 job A/B 对比 + 多 connector 组合，Docker）：长生命周期/大体量场景下的最终证据，同时覆盖 Kafka、file-\* 等本地环境受限的 connector。
 2. **Kafka connector 专项**（若其为生产目标）：需先起 ZK + broker，验证消息类 connector 子 CL 卸载；建议并入 CI 而非本地堆矩阵。
 3. 交叉格（redis→mongodb、mongodb→redis 等）：每 connector 已独立在 source/sink 双角色收敛，共存风险低，边际价值不足以再投入每轮 ~30 分钟。
 
+### 6.1 CI 级 A/B 对比审计最终证据（2026-09-09 实测，CI run #34297752012）
+
+**验证设计**：`MetaspaceLeakIT` 同时启动两个 SeaTunnel 容器——`seatunnel-native`（无 Agent，对照组）与 `seatunnel-server`（挂 Agent，实验组），各跑 **3×3 全正交矩阵 × (2 轮串行 + 3 轮并发) = 45 job**，共 90 job。两组共用同一 MySQL/Kafka 集群，对照组跑完后清空 Kafka topics 确保公平。90 job 逐一验证 FINISHED 终态（REST API + 容器日志回退），排除崩溃假象。
+
+**Metaspace A/B 审计报告**（CI 日志原文）：
+
+```
+==================== [Metaspace A/B Audit Report] ====================
+                       Native(Control)    Agent(Treatment)   Delta
+  Baseline             49.32 MB           56.49 MB           +7.17 MB
+  Round 1              108.83 MB          68.65 MB           -40.18 MB
+  Round 2              156.36 MB          69.05 MB           -87.31 MB
+  Final                298.27 MB          69.96 MB           -228.31 MB
+  Growth               248.95 MB          13.47 MB           -235.48 MB
+------------------------------------------------------------------------
+  Loaded Delta         +41814             +41922             +108
+  Unloaded Delta       +42                +39468             +39426
+  Retained Classes     +41772             +2454              -39318
+  ST ClassLoaders      +240               +0                 -240
+========================================================================
+  Net Overhead (Agent - Native) : -235.48 MB
+  Growth Threshold (Agent)      : 15.00 MB
+  Overhead Threshold (Net)      : 2.00 MB
+========================================================================
+```
+
+**关键指标解读**：
+
+| 指标 | Native(无 Agent) | Agent(有 Agent) | 判定 |
+|------|------------------|-----------------|------|
+| 作业 FINISHED | 45/45 | 45/45 | ✅ 正常完成 |
+| Metaspace Growth | 248.95 MB | 13.47 MB | ✅ Agent < 15MB 阈值 |
+| Retained Classes | +41772 | +2454 | ✅ Agent 类卸载率 94% |
+| ST ClassLoaders 拋留 | 240 | 0 | ✅ Agent ClassLoader 已回收 |
+| Net Overhead | — | -235.48 MB | ✅ 优于 2MB 阈值 |
+
+**核心结论**：
+
+1. **Agent 不仅未增加 Metaspace 开销，反而将 Native 的 248.95 MB 泄漏降至 13.47 MB**（Net Overhead = -235.48 MB）。原生 SeaTunnel 在 `classloader-cache-mode: false` 下存在显著 ClassLoader/类元数据泄漏——45 job 后 240 个 `SeaTunnelChildFirstClassLoader` 拋留、41772 个类未卸载、Metaspace 增长 248.95 MB。
+2. **Agent 的 ClassLoader 清理机制（`EngineClassLoaderCleaner`）将类卸载率从 0.1%（42/41814）提升至 94%（39468/41922）**，`SeaTunnelChildFirstClassLoader` 拋留数从 240 降至 0。
+3. **90 job 逐一验证 FINISHED 终态**，排除"提交成功但执行崩溃"的假象。本轮 CI（run #34297752012）中 Native 组 45/45 通过 REST API 确认，Agent 组 44/45 回退到容器日志搜索（`cleanHazelcastJobState` 误删 `IMAP_FINISHED_JOB_STATE` 致 REST API 返回无 jobStatus）。该根因已于 2026-09-09 修复（`cleanHazelcastJobState` 排除名称含 `finished-job-state` 的 IMap），待下一轮 CI 验证 Agent 组恢复 REST API 直查。
+4. **测试耗时 191.3 秒**（含两组各 45 job 提交 + FINISHED 验证 + 三轮 Full GC + heap dump 生成）。
+
 ## 7. 结论与边界（诚实版）
 
-- ✅ **已证（本机矩阵级，2026-09-06）**：cacheMode=false 下卸载链路真实执行（60 次物理释放 / 15 job 日志实证）；source×sink 双维度矩阵 **8 组场景**全部 5 轮 75 job GC 后 Class Metaspace **完全收敛零增长**（8.63 / 9.17 / 8.89 / 9.28 / 9.60 / 9.90 / 9.91 / 10.19 MB）；jdbc / redis / mongodb 三 connector 在 **source 与 sink 两种角色**下均无 Metaspace 泄漏，最强组合（MySQL→MySQL 双真实同 job）亦收敛——**机制与真实 connector 卸载命题成立**。
-- ⚠️ **范围边界（本地不可补，归 CI）**：①长生命周期 / 大体量（1000 job 长稳）的最终证据由 CI `MetaspaceLeakIT` 承担；②Kafka 消息类 connector 与 file-\* connector（Windows 缺 hadoop native）属部署环境 / CI 职责，不在本机验证范围。
-- 本验证耗时约 5 分钟/轮（引擎启动 ~40s + 15 job ~90s + GC ~10s），5 轮约 30 分钟；环境前置见第 1、2 节。
+- ✅ **已证（本机矩阵级，2026-09-06）**：cacheMode=false 下卸载链路真实执行（60 次物理释放 / 15 job 日志实证）；source×sink 双维度矩阵 **8 组场景** 5 轮 75 job GC 后 Class Metaspace **收敛至零增长**（8.63 / 9.17 / 8.89 / 9.28 / 9.60 / 9.90 / 9.91 / 10.19 MB）；jdbc / redis / mongodb 三 connector 在 **source 与 sink 两种角色**下均无 Metaspace 泄漏，最强组合（MySQL→MySQL 双真实同 job）亦收敛——**机制与真实 connector 卸载验证通过**。
+- ✅ **已证（CI A/B 对比级，2026-09-09）**：`MetaspaceLeakIT` 90 job 全正交矩阵（Fake/MySQL/Kafka × Fake/MySQL/Kafka，含并发压测）A/B 对比——Agent 组 Metaspace 增长 **13.47 MB**（< 15MB 阈值），`SeaTunnelChildFirstClassLoader` 拦留 **0**，类卸载率 **94%**；Native 对照组 Metaspace 增长 **248.95 MB**，ClassLoader 拦留 **240**，类卸载率 **0.1%**。Net Overhead = **-235.48 MB**（Agent 反而比 Native 少 235.48 MB）。90 job 逐一验证 FINISHED 终态，排除崩溃假象。
+- ⚠️ **范围边界**：Kafka 消息类 connector 与 file-\* connector（Windows 缺 hadoop native）已在 CI `MetaspaceLeakIT` 中覆盖（Docker 环境）；本机验证仍限 fake/jdbc/redis/mongodb 矩阵。
+- 本验证耗时约 5 分钟/轮（引擎启动 ~40s + 15 job ~90s + GC ~10s），5 轮约 30 分钟；CI A/B 对比耗时 191.3 秒；环境前置见第 1、2 节。

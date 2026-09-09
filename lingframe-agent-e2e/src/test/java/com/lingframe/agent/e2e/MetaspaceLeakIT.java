@@ -124,7 +124,7 @@ class MetaspaceLeakIT {
     }
 
     private static String formatDelta(long delta) {
-        if (delta < 0) {
+        if (delta == Long.MIN_VALUE) {
             return "N/A";
         }
         return String.format(Locale.ROOT, "%+d", delta);
@@ -202,6 +202,10 @@ class MetaspaceLeakIT {
         log.info("  Growth Threshold (Agent)      : {}", formatMb(METASPACE_GROWTH_THRESHOLD_BYTES));
         log.info("  Overhead Threshold (Net)      : {}", formatMb(MAX_NET_OVERHEAD_BYTES));
         log.info("========================================================================");
+
+        // 按 ClassLoader 分组打印类统计，证明 retained classes 归属（非子 CL）
+        dumpClassLoaderStats(AGENT_CONTAINER_NAME, "Agent-Treatment");
+        dumpClassLoaderStats(NATIVE_CONTAINER_NAME, "Native-Control");
 
         assertThat(netOverhead)
                 .as("Agent net overhead should be <= %d bytes, actual: %d (nativeGrowth: %d, agentGrowth: %d)",
@@ -356,9 +360,9 @@ class MetaspaceLeakIT {
         final long unloadedDelta;
         final long retainedClasses;
         if (baselineClassCounts[0] < 0 || finalClassCounts[0] < 0) {
-            loadedDelta = -1L;
-            unloadedDelta = -1L;
-            retainedClasses = -1L;
+            loadedDelta = Long.MIN_VALUE;
+            unloadedDelta = Long.MIN_VALUE;
+            retainedClasses = Long.MIN_VALUE;
         } else {
             loadedDelta = finalClassCounts[0] - baselineClassCounts[0];
             unloadedDelta = finalClassCounts[1] - baselineClassCounts[1];
@@ -724,7 +728,7 @@ class MetaspaceLeakIT {
      * 与 SeaTunnel 官方 E2E（{@code SeaTunnelContainer.classLoaderObjectCheck}）方法一致。
      *
      * @param containerName 容器名
-     * @return 存活实例数，采样失败返回 -1
+     * @return 存活实例数，采样失败返回 Long.MIN_VALUE
      */
     private long countSeaTunnelClassLoaders(String containerName) {
         final String targetClass =
@@ -752,7 +756,117 @@ class MetaspaceLeakIT {
         } catch (Exception e) {
             log.warn("Failed to count SeaTunnelChildFirstClassLoader in container {}: {}",
                     containerName, e.getMessage());
-            return -1L;
+            return Long.MIN_VALUE;
+        }
+    }
+
+    /**
+     * 通过 {@code jmap -clstats <pid>} 输出按 ClassLoader 分组的类统计，
+     * 证明 retained classes 归属（bootstrap/AppCL vs SeaTunnelChildFirstClassLoader）。
+     * <p>
+     * {@code jmap -clstats} 输出格式（tab 分隔）：
+     * <pre>
+     * class_loader   classes  bytes  parent_loader  alive?  type
+     * &lt;bootstrap&gt;    515      ...    null           live    &lt;internal&gt;
+     * 0x...           1        ...    0x...          dead    SeaTunnelChildFirstClassLoader@...
+     * total = 6       520             N/A            alive=3, dead=3
+     * </pre>
+     * 解析后按 CL 类型分组打印摘要，直观呈现 retained classes 来自哪些 CL。
+     *
+     * @param containerName 容器名
+     * @param label 审计标签（如 "Agent-Treatment"）
+     */
+    private void dumpClassLoaderStats(String containerName, String label) {
+        try {
+            final String pid = resolveJavaPid(containerName);
+            final ProcessBuilder pb = new ProcessBuilder(
+                    "docker", "exec", containerName, "jmap", "-clstats", pid);
+            pb.redirectErrorStream(true);
+            final Process p = pb.start();
+            final List<String> lines = new ArrayList<>();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    lines.add(line);
+                }
+            }
+            p.waitFor(30, TimeUnit.SECONDS);
+
+            long bootstrapClasses = 0;
+            long appClasses = 0;
+            long subClTotalClasses = 0;
+            int subClAlive = 0;
+            int subClDead = 0;
+            long otherClasses = 0;
+            int otherAlive = 0;
+            int otherDead = 0;
+
+            for (String line : lines) {
+                if (line == null || line.isEmpty() || line.startsWith("class_loader")
+                        || line.startsWith("total") || line.startsWith("finding")
+                        || line.startsWith("computing") || line.startsWith("please")
+                        || line.startsWith("Attaching") || line.startsWith("Debugger")
+                        || line.startsWith("Server compiler") || line.startsWith("JVM version")) {
+                    continue;
+                }
+                final String[] cols = line.split("\\t");
+                if (cols.length < 5) {
+                    continue;
+                }
+                final String clRef = cols[0].trim();
+                final long classesCount;
+                try {
+                    classesCount = Long.parseLong(cols[1].trim());
+                } catch (NumberFormatException nfe) {
+                    continue;
+                }
+                final String aliveStatus = cols[4].trim();
+                final boolean isAlive = "live".equalsIgnoreCase(aliveStatus);
+                final String typeStr = cols.length > 5 ? cols[5].trim() : "";
+
+                if ("<bootstrap>".equals(clRef)) {
+                    bootstrapClasses = classesCount;
+                } else if (typeStr.contains("SeaTunnelChildFirstClassLoader")) {
+                    subClTotalClasses += classesCount;
+                    if (isAlive) {
+                        subClAlive++;
+                    } else {
+                        subClDead++;
+                    }
+                } else if (typeStr.contains("AppClassLoader")) {
+                    appClasses = classesCount;
+                } else if (typeStr.contains("ExtClassLoader")) {
+                    otherClasses += classesCount;
+                    if (isAlive) {
+                        otherAlive++;
+                    } else {
+                        otherDead++;
+                    }
+                } else {
+                    otherClasses += classesCount;
+                    if (isAlive) {
+                        otherAlive++;
+                    } else {
+                        otherDead++;
+                    }
+                }
+            }
+
+            log.info("[{}] ========== ClassLoader Stats (jmap -clstats) ==========", label);
+            log.info("[{}]   <bootstrap>                {} classes  live", label, bootstrapClasses);
+            log.info("[{}]   AppClassLoader             {} classes  live", label, appClasses);
+            log.info("[{}]   SeaTunnelChildFirstCL      {} classes  (alive={}, dead={})",
+                    label, subClTotalClasses, subClAlive, subClDead);
+            log.info("[{}]   other CLs                  {} classes  (alive={}, dead={})",
+                    label, otherClasses, otherAlive, otherDead);
+            final long retainedFromSystem = bootstrapClasses + appClasses;
+            log.info("[{}]   retained from bootstrap+AppCL: {} (sub CL classes: {})",
+                    label, retainedFromSystem, subClTotalClasses);
+            log.info("[{}] ===========================================================", label);
+        } catch (Exception e) {
+            log.warn("[{}] Failed to dump ClassLoader stats in container {}: {}",
+                    label, containerName, e.getMessage());
         }
     }
 
@@ -821,19 +935,7 @@ class MetaspaceLeakIT {
     }
 
     /**
-     * 计算 retained classes（loaded delta - unloaded delta），即未卸载的类元数据净增数。
-     * 若 baseline 或 final 采样失败（含 -1），返回 -1 表示不可用。
-     */
-    private static long computeRetainedClasses(long[] baseline, long[] finalSample) {
-        if (baseline[0] < 0 || finalSample[0] < 0) {
-            return -1L;
-        }
-        final long loadedDelta = finalSample[0] - baseline[0];
-        final long unloadedDelta = finalSample[1] - baseline[1];
-        return loadedDelta - unloadedDelta;
-    }
 
-    /**
      * 打印类加载/卸载净增（baseline -> final），定位 Metaspace 泄漏是否源于类未卸载。
      * <p>
      * 判据：若加载持续增加而卸载近零（retained 净增），则类元数据未随 job 结束回滚，

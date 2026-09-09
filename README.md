@@ -18,7 +18,7 @@ export JAVA_OPTS="$JAVA_OPTS --add-opens java.base/java.net=ALL-UNNAMED \
 
 > **💡 节点挂载指引**：
 > - **混合模式（Hybrid）/ 单容器**：Master 与 Worker 共进程，直接配置即可覆盖全部调度与执行。
-> - **分离集群模式（Separated）**：**Worker 节点必须挂载（强依赖）**（连接器动态加载/卸载、Task 批次执行、TCCL 泄漏均在 Worker 发生）；Master 节点建议一并挂载以实现全链路 DAG 依赖监控与 MBean 可观测性。
+> - **分离集群模式（Separated）**：**Worker 节点建议挂载（强依赖）**（连接器动态加载/卸载、Task 批次执行、TCCL 泄漏均在 Worker 发生）；Master 节点建议一并挂载以实现全链路 DAG 依赖监控与 MBean 可观测性。
 
 ### 治理配置
 
@@ -62,11 +62,14 @@ Agent 借道 LingFrame 治理流水线（GOVERN_ONLY 模式），真实生效范
 >    为共享缓存常驻（上游设计，非泄漏）。**本机实证（2026-09-06，source × sink 双维度矩阵）**：真实引擎
 >    `cache-mode: false` + governed agent 循环 job，卸载链路真实执行（15 job 产生 60 次物理释放日志），
 >    **8 组场景**（fake / jdbc-H2 / MySQL / Redis / MongoDB 作 source，console / MongoDB / Redis / JDBC 作 sink，
->    含 MySQL→MySQL 双真实同 job）全部 5 轮 × 15 job = 75 job 的 Full GC 后 Class Metaspace **完全收敛零增长**
+>    含 MySQL→MySQL 双真实同 job）5 轮 × 15 job = 75 job 的 Full GC 后 Class Metaspace **收敛至零增长**
 >    （8.63 / 9.17 / 8.89 / 9.28 / 9.60 / 9.90 / 9.91 / 10.19 MB），jdbc/redis/mongodb 在 source 与 sink
->    两种角色下均无泄漏。**全真环境闭环**：CI 已通过全真容器化（MySQL 8.0 + Kafka 3.7.0 KRaft）构建
->    Fake / MySQL / Kafka × Console / MySQL / Kafka **3×3 = 9 组全正交矩阵**与 **4 线程异构并发交错压测**，
->    单 Job 吞吐对齐 1,000 行工业级基线，实证 Metaspace 增长严格收敛（<15MB）零泄漏。
+>    两种角色下均无泄漏。**CI A/B 对比审计最终证据（2026-09-09）**：全真容器化（MySQL 8.0 + Kafka 3.7.0 KRaft）
+>    构建 Fake / MySQL / Kafka × Console / MySQL / Kafka **3×3 = 9 组全正交矩阵**与 **4 线程异构并发交错压测**，
+>    Native 对照组（无 Agent）与 Agent 实验组各跑 **45 job（共 90 job）**，逐一验证 FINISHED 终态。
+>    **Agent 组 Metaspace 增长 13.47 MB**（< 15MB 阈值），`SeaTunnelChildFirstClassLoader` 拋留 **0**，类卸载率 **94%**；
+>    **Native 对照组 Metaspace 增长 248.95 MB**，ClassLoader 拋留 **240**，类卸载率 **0.1%**。
+>    **Net Overhead = -235.48 MB**（Agent 反而比 Native 少 235.48 MB——在本测试场景下 Agent 呈净收益）。
 >    **完整复现流程与数据见 [`docs/classloader-unload-verification.md`](docs/classloader-unload-verification.md)**。
 > 3. **弹性治理按作业隔离**：`per-job-governance-enabled` 默认 `true`，治理身份按作业生成（jobID 提取 + 版本指纹门控），限流/熔断/健康状态按作业隔离，故障作业不波及其他作业；显式 `false` 回退引擎级共享灵元。治理动作生效性（限流拦截/熔断打开）已在真实引擎端到端验证（`JobIsolationIT` / `DualJobFaultInjectionIT` / JMH governed 跑分）。
 
@@ -96,7 +99,7 @@ mvn -B clean verify -Pintegration-check
 
 ## 版本
 
-独立版本号，不跟随 LingFrame 主仓。格式：`{agent-version}-seatunnel-{seatunnel-baseline}`。
+版本号格式：`{agent-version}-seatunnel-{seatunnel-baseline}`。
 
 ## License
 
