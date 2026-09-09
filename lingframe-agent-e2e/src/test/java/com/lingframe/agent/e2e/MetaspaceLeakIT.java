@@ -551,6 +551,7 @@ class MetaspaceLeakIT {
     private void waitForJobFinished(String submitUrl, String jobId, String jobTag,
                                     int timeoutSeconds, String containerName) throws IOException {
         final String jobInfoUrl = submitUrl.replace("submit-job", "running-job") + "/" + jobId;
+        final String finishedJobUrl = submitUrl.replace("submit-job", "finished-job-state") + "/" + jobId;
         log.info("[{}] Polling job status at {}", jobTag, jobInfoUrl);
         final long deadline = System.currentTimeMillis() + timeoutSeconds * 1000L;
         String lastStatus = "UNKNOWN";
@@ -579,6 +580,11 @@ class MetaspaceLeakIT {
                                     + ") ended with status " + jobStatus + ", body: " + body);
                         }
                     } else {
+                        final String finishedStatus = queryFinishedJobState(finishedJobUrl);
+                        if ("FINISHED".equals(finishedStatus)) {
+                            log.info("[{}] Job {} -> FINISHED (via REST API finished-job-state)", jobTag, jobId);
+                            return;
+                        }
                         if (!apiNoStatusLogged) {
                             log.warn("[{}] Job {} REST API returned no jobStatus, body: {}. "
                                     + "Falling back to container log.", jobTag, jobId, body);
@@ -608,7 +614,7 @@ class MetaspaceLeakIT {
                 conn.disconnect();
             }
             try {
-                Thread.sleep(2000);
+                Thread.sleep(1000);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IOException("Interrupted while waiting for job " + jobTag, e);
@@ -617,6 +623,49 @@ class MetaspaceLeakIT {
         throw new IOException("Job " + jobTag + " (id=" + jobId + ") did not finish within "
                 + timeoutSeconds + " seconds, last status: " + lastStatus);
     }
+
+    /**
+     * 查询 {@code finished-job-state} IMap 确认作业是否已到达终态。
+     * <p>
+     * 当 {@code running-job} IMap 中条目已被引擎 {@code cleanJob()} 移除时，
+     * 作业状态转入 {@code finished-job-state} IMap。此方法
+     * 作为 {@code running-job} 查询的 fallback，避免回退到容器日志。
+     *
+     * @param finishedJobUrl finished-job-state IMap 的 REST URL
+     * @return jobStatus 字符串（FINISHED/FAILED/CANCELED），查询失败返回 null
+     */
+    private String queryFinishedJobState(String finishedJobUrl) {
+        try {
+            final HttpURLConnection conn = (HttpURLConnection) new URL(finishedJobUrl).openConnection();
+            try {
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(10000);
+                if (conn.getResponseCode() != 200) {
+                    return null;
+                }
+                final String body;
+                try (InputStream is = conn.getInputStream()) {
+                    body = readAll(is);
+                }
+                final String status = extractJsonField(body, "jobStatus");
+                if (status != null) {
+                    return status;
+                }
+                for (String s : new String[]{"FINISHED", "FAILED", "CANCELED"}) {
+                    if (body.contains(s)) {
+                        return s;
+                    }
+                }
+            } finally {
+                conn.disconnect();
+            }
+        } catch (Exception e) {
+            log.debug("queryFinishedJobState failed for {}: {}", finishedJobUrl, e.getMessage());
+        }
+        return null;
+    }
+
 
     /**
      * 从容器日志搜索指定作业的状态转换记录。

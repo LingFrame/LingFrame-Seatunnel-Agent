@@ -53,6 +53,8 @@ services:
     depends_on:
       - mysql-server
       - kafka-server
+    cap_add:
+      - SYS_PTRACE
     ports:
       - "5801:5801"
     environment:
@@ -84,6 +86,8 @@ services:
     depends_on:
       - mysql-server
       - kafka-server
+    cap_add:
+      - SYS_PTRACE
     ports:
       - "5802:5801"
     environment:
