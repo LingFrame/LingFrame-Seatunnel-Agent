@@ -358,7 +358,11 @@ public final class EngineClassLoaderCleaner {
             fieldsCleared += nullifyField(jobMaster, "jobDAGInfo");
             fieldsCleared += nullifyField(jobMaster, "checkpointManager");
             fieldsCleared += nullifyField(jobMaster, "jobImmutableInformation");
-            fieldsCleared += nullifyField(jobMaster, "jobMasterCompleteFuture");
+            // 注意：不 nullify jobMasterCompleteFuture——它是 CompletableFuture<JobResult>（AppClassLoader 加载），
+            // 不持有 connector ClassLoader GC Root，nullify 无益于 ClassLoader 回收。
+            // 引擎 initStateFuture callback 在 cleanJob() 返回后执行 jobMasterCompleteFuture.complete(jobResult)（行 381），
+            // advice（@OnMethodExit on cleanJob()）在 cleanJob() 返回后触发 nullify，
+            // 若 nullify 该字段会导致 callback NPE（CI run 34382465832 实测 45 次 NPE）。
 
 
             log.info("EngineClassLoaderCleaner severed Coordinator GC roots for JobMaster {} ({} fields cleared)",
