@@ -1,6 +1,9 @@
 package com.lingframe.agent.cleaner;
 
 
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.map.IMap;
 import com.lingframe.agent.bridge.LingFrameAgentBridge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -62,6 +65,7 @@ public final class EngineClassLoaderCleaner {
     private static final String FIELD_REF_COUNT = "classLoaderReferenceCount";
     private static final String FIELD_JOB_ID = "jobId";
     private static final String FIELD_RUNNING_JOB_MASTER_MAP = "runningJobMasterMap";
+    private static final String IMAP_RUNNING_JOB_INFO = "engine_runningJobInfo";
     private static final String PROTOSTUFF_SERIALIZER_TYPE =
             "org.apache.seatunnel.engine.serializer.protobuf.ProtoStuffSerializer";
 
@@ -154,6 +158,7 @@ public final class EngineClassLoaderCleaner {
         coordinatorService = null;
 
         JOB_CLASS_LOADERS.clear();
+        CLEANED_JOB_MASTERS.clear();
         CLEANED_COUNT.set(0);
     }
 
@@ -282,7 +287,9 @@ public final class EngineClassLoaderCleaner {
             }
 
             if (jobId > 0) {
-
+                // 标记已清理——无论从 advice 还是 cleanFinishedJobMasters 调用，
+                // 均防止 cleanFinishedJobMasters 重复调用 cleanJobMaster。
+                CLEANED_JOB_MASTERS.put(jobId, Boolean.TRUE);
                 forceEvictJobClassLoaders(jobId);
             }
 
@@ -375,6 +382,16 @@ public final class EngineClassLoaderCleaner {
      */
     public static void forceEvictJobClassLoaders(long jobId) {
         if (jobId <= 0) {
+            return;
+        }
+
+        // 延迟检查：若引擎 engine_runningJobInfo IMap 中仍有该作业条目，
+        // 说明引擎尚未执行 removeJobIMap()，此时释放 ClassLoader 会导致
+        // REST API 反序列化 JobInfo 时 ClassNotFoundException（HTTP 500）。
+        // 等待引擎 cleanJob() → removeJobIMap() 清理 IMap 后下一周期再释放。
+        if (isJobInRunningJobIMap(jobId)) {
+            log.info("Deferring ClassLoader eviction for job {} - {} IMap entry still present",
+                    jobId, IMAP_RUNNING_JOB_INFO);
             return;
         }
 
@@ -898,8 +915,17 @@ public final class EngineClassLoaderCleaner {
                         final Object jm = entry.getValue();
                         if (jm != null && isJobMasterFinished(jm)) {
                             final Long jobId = extractJobIdFromJobMaster(jm);
-                            if (jobId > 0 && CLEANED_JOB_MASTERS.putIfAbsent(jobId, Boolean.TRUE) == null) {
-                                cleanJobMaster(jm);
+                            if (jobId > 0) {
+                                // 延迟检查：若引擎尚未执行 cleanJob()（runningJobInfoIMap 仍有条目），
+                                // 跳过本次清理——否则 nullify physicalPlan/logicalDag 会导致引擎 cleanJob() NPE。
+                                if (isJobInRunningJobIMap(jobId)) {
+                                    log.info("Deferring JobMaster cleanup for job {} - {} IMap entry still present",
+                                            jobId, IMAP_RUNNING_JOB_INFO);
+                                    continue;
+                                }
+                                if (CLEANED_JOB_MASTERS.putIfAbsent(jobId, Boolean.TRUE) == null) {
+                                    cleanJobMaster(jm);
+                                }
                             }
                         }
                     }
@@ -995,6 +1021,41 @@ public final class EngineClassLoaderCleaner {
             return null;
         }
         return activeIds;
+    }
+
+    /**
+     * 检查引擎 {@code engine_runningJobInfo} IMap 中是否仍有指定作业的条目。
+     * <p>
+     * 引擎 {@code JobMaster.cleanJob()} 的执行顺序为：
+     * {@code storeFinishedJobState} → {@code removeJobIMap()}（含 {@code runningJobInfoIMap.remove}）。
+     * 在 {@code removeJobIMap()} 执行前释放 ClassLoader 会导致 REST API 反序列化
+     * {@code JobInfo} 时 {@code ClassNotFoundException}（HTTP 500）；
+     * 在此前 nullify {@code physicalPlan}/{@code logicalDag} 会导致 {@code cleanJob()} NPE。
+     * <p>
+     * 因此本方法返回 {@code true} 时，调用方必须延迟 ClassLoader 释放与字段置空。
+     *
+     * @param jobId 作业标识
+     * @return true 表示 IMap 中仍有条目，引擎尚未执行 {@code removeJobIMap()}
+     */
+    private static boolean isJobInRunningJobIMap(long jobId) {
+        if (jobId <= 0) {
+            return false;
+        }
+        try {
+            for (HazelcastInstance hz : Hazelcast.getAllHazelcastInstances()) {
+                try {
+                    final IMap<Long, ?> map = hz.getMap(IMAP_RUNNING_JOB_INFO);
+                    if (map.containsKey(jobId)) {
+                        return true;
+                    }
+                } catch (Throwable t) {
+                    log.debug("Failed to check {} IMap: {}", IMAP_RUNNING_JOB_INFO, t.getMessage());
+                }
+            }
+        } catch (Throwable t) {
+            log.debug("Failed to query Hazelcast instances for job {}: {}", jobId, t.getMessage());
+        }
+        return false;
     }
 
     /**
