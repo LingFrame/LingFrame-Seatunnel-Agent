@@ -66,9 +66,11 @@ class MetaspaceLeakIT {
         private final long loadedDelta;
         private final long unloadedDelta;
         private final long retainedClasses;
+        private final long classLoaderCount;
 
         MetaspaceAuditResult(long baseline, long round1, long round2, long finalUsed,
-                             long loadedDelta, long unloadedDelta, long retainedClasses) {
+                             long loadedDelta, long unloadedDelta, long retainedClasses,
+                             long classLoaderCount) {
             this.baseline = baseline;
             this.round1 = round1;
             this.round2 = round2;
@@ -77,6 +79,7 @@ class MetaspaceLeakIT {
             this.loadedDelta = loadedDelta;
             this.unloadedDelta = unloadedDelta;
             this.retainedClasses = retainedClasses;
+            this.classLoaderCount = classLoaderCount;
         }
 
         public long getBaseline() {
@@ -109,6 +112,10 @@ class MetaspaceLeakIT {
 
         public long getRetainedClasses() {
             return retainedClasses;
+        }
+
+        public long getClassLoaderCount() {
+            return classLoaderCount;
         }
     }
 
@@ -186,6 +193,10 @@ class MetaspaceLeakIT {
                 formatDelta(nativeResult.getRetainedClasses()),
                 formatDelta(agentResult.getRetainedClasses()),
                 formatDelta(agentResult.getRetainedClasses() - nativeResult.getRetainedClasses())));
+        log.info("{}", reportRow("ST ClassLoaders",
+                formatDelta(nativeResult.getClassLoaderCount()),
+                formatDelta(agentResult.getClassLoaderCount()),
+                formatDelta(agentResult.getClassLoaderCount() - nativeResult.getClassLoaderCount())));
         log.info("========================================================================");
         log.info("  Net Overhead (Agent - Native) : {}", formatMb(netOverhead));
         log.info("  Growth Threshold (Agent)      : {}", formatMb(METASPACE_GROWTH_THRESHOLD_BYTES));
@@ -353,8 +364,11 @@ class MetaspaceLeakIT {
             unloadedDelta = finalClassCounts[1] - baselineClassCounts[1];
             retainedClasses = loadedDelta - unloadedDelta;
         }
+        final long classLoaderCount = countSeaTunnelClassLoaders(containerName);
+        log.info("[{}] SeaTunnelChildFirstClassLoader live instances: {}",
+                targetLabel, classLoaderCount);
         return new MetaspaceAuditResult(baseline, round1Used, round2Used, finalUsed,
-                loadedDelta, unloadedDelta, retainedClasses);
+                loadedDelta, unloadedDelta, retainedClasses, classLoaderCount);
     }
 
 
@@ -697,6 +711,49 @@ class MetaspaceLeakIT {
             }
         }
         return sb.toString();
+    }
+
+    /**
+     * 统计容器内 SeaTunnelChildFirstClassLoader 的存活实例数。
+     * <p>
+     * 通过 {@code jmap -histo:live <pid>} 获取堆直方图，搜索
+     * {@code org.apache.seatunnel.engine.common.loader.SeaTunnelChildFirstClassLoader}
+     * 的实例数。此值直接反映作业结束后 ClassLoader 是否被 GC 回收——
+     * 若 Agent 阻碍了 ClassLoader 释放，此值将大于 0。
+     * <p>
+     * 与 SeaTunnel 官方 E2E（{@code SeaTunnelContainer.classLoaderObjectCheck}）方法一致。
+     *
+     * @param containerName 容器名
+     * @return 存活实例数，采样失败返回 -1
+     */
+    private long countSeaTunnelClassLoaders(String containerName) {
+        final String targetClass =
+                "org.apache.seatunnel.engine.common.loader.SeaTunnelChildFirstClassLoader";
+        try {
+            final String pid = resolveJavaPid(containerName);
+            final ProcessBuilder pb = new ProcessBuilder(
+                    "docker", "exec", containerName, "jmap", "-histo:live", pid);
+            pb.redirectErrorStream(true);
+            final Process p = pb.start();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.contains(targetClass)) {
+                        final String[] parts = line.trim().split("\\s+");
+                        if (parts.length >= 2) {
+                            return Long.parseLong(parts[1]);
+                        }
+                    }
+                }
+            }
+            p.waitFor(30, TimeUnit.SECONDS);
+            return 0L;
+        } catch (Exception e) {
+            log.warn("Failed to count SeaTunnelChildFirstClassLoader in container {}: {}",
+                    containerName, e.getMessage());
+            return -1L;
+        }
     }
 
     private static final Pattern HEAP_INFO_METASPACE_PATTERN =
