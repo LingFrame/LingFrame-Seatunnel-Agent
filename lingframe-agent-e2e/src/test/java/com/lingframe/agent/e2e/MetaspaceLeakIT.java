@@ -68,10 +68,12 @@ class MetaspaceLeakIT {
         private final long retainedClasses;
         private final long classLoaderCount;
         private final ClassLoaderStatsResult baselineClStats;
+        private final ClassLoaderStatsResult preGcClStats;
 
         MetaspaceAuditResult(long baseline, long round1, long round2, long finalUsed,
                              long loadedDelta, long unloadedDelta, long retainedClasses,
-                             long classLoaderCount, ClassLoaderStatsResult baselineClStats) {
+                             long classLoaderCount, ClassLoaderStatsResult baselineClStats,
+                             ClassLoaderStatsResult preGcClStats) {
             this.baseline = baseline;
             this.round1 = round1;
             this.round2 = round2;
@@ -82,6 +84,7 @@ class MetaspaceLeakIT {
             this.retainedClasses = retainedClasses;
             this.classLoaderCount = classLoaderCount;
             this.baselineClStats = baselineClStats;
+            this.preGcClStats = preGcClStats;
         }
 
         public long getBaseline() {
@@ -122,6 +125,10 @@ class MetaspaceLeakIT {
 
         public ClassLoaderStatsResult getBaselineClStats() {
             return baselineClStats;
+        }
+
+        public ClassLoaderStatsResult getPreGcClStats() {
+            return preGcClStats;
         }
     }
 
@@ -210,8 +217,10 @@ class MetaspaceLeakIT {
         log.info("========================================================================");
 
         // 按 ClassLoader 分组打印类统计，证明 retained classes 归属（非子 CL）
-        dumpClassLoaderStats(AGENT_CONTAINER_NAME, "Agent-Treatment", agentResult.getBaselineClStats());
-        dumpClassLoaderStats(NATIVE_CONTAINER_NAME, "Native-Control", nativeResult.getBaselineClStats());
+        dumpClassLoaderStats(AGENT_CONTAINER_NAME, "Agent-Treatment",
+                agentResult.getBaselineClStats(), agentResult.getPreGcClStats());
+        dumpClassLoaderStats(NATIVE_CONTAINER_NAME, "Native-Control",
+                nativeResult.getBaselineClStats(), nativeResult.getPreGcClStats());
 
         // ====== 泄漏判定（综合方案：诊断先行 → 断言殿后）======
         // 采样失败（Long.MIN_VALUE）时跳过而非误判
@@ -372,6 +381,15 @@ class MetaspaceLeakIT {
         // Kafka source 作业消费全量消息可能需要较长时间，30 秒确保所有作业完成
         Thread.sleep(30000);
 
+        // 5.5 GC 前 clstats 采样（作业全部 FINISHED 后、Full GC 前）
+        final ClassLoaderStatsResult preGcClStats =
+                captureClassLoaderStats(containerName, targetLabel + "-pre-gc");
+        final long preGcTotal = preGcClStats.bootstrapClasses + preGcClStats.appClasses
+                + preGcClStats.subClTotalClasses + preGcClStats.otherClasses;
+        log.info("[{}] clstats pre-GC total classes: {} (bootstrap={}, AppCL={}, STCL={}, other={})",
+                targetLabel, preGcTotal, preGcClStats.bootstrapClasses, preGcClStats.appClasses,
+                preGcClStats.subClTotalClasses, preGcClStats.otherClasses);
+
         // 5. 阶段三：强制 Full GC 并采样终态 Metaspace
         forceFullGcInContainer(containerName);
         final long finalUsed = getCurrentMetaspaceUsed(containerName);
@@ -403,7 +421,8 @@ class MetaspaceLeakIT {
             retainedClasses = loadedDelta - unloadedDelta;
         }
         return new MetaspaceAuditResult(baseline, round1Used, round2Used, finalUsed,
-                loadedDelta, unloadedDelta, retainedClasses, classLoaderCount, baselineClStats);
+                loadedDelta, unloadedDelta, retainedClasses, classLoaderCount, baselineClStats,
+                preGcClStats);
     }
 
 
@@ -955,7 +974,8 @@ class MetaspaceLeakIT {
     }
 
     private void dumpClassLoaderStats(String containerName, String label,
-                                      ClassLoaderStatsResult baseline) {
+                                      ClassLoaderStatsResult baseline,
+                                      ClassLoaderStatsResult preGc) {
         final ClassLoaderStatsResult r = captureClassLoaderStats(containerName, label);
 
         log.info("[{}] ========== ClassLoader Stats (jmap -clstats) ==========", label);
@@ -970,15 +990,31 @@ class MetaspaceLeakIT {
                 label, retainedFromSystem, r.subClTotalClasses);
 
         if (baseline != null) {
-            log.info("[{}]   ----- Delta from baseline -----", label);
-            log.info("[{}]   <bootstrap>    delta: {} classes", label, r.bootstrapClasses - baseline.bootstrapClasses);
-            log.info("[{}]   AppClassLoader  delta: {} classes", label, r.appClasses - baseline.appClasses);
-            log.info("[{}]   SeaTunnelChildFirstCL  delta: {} classes (alive {} -> {}, dead {} -> {})",
-                    label, r.subClTotalClasses - baseline.subClTotalClasses,
-                    baseline.subClAlive, r.subClAlive, baseline.subClDead, r.subClDead);
-            log.info("[{}]   other CLs      delta: {} classes (alive {} -> {}, dead {} -> {})",
-                    label, r.otherClasses - baseline.otherClasses,
-                    baseline.otherAlive, r.otherAlive, baseline.otherDead, r.otherDead);
+            final long baselineTotal = baseline.bootstrapClasses + baseline.appClasses
+                    + baseline.subClTotalClasses + baseline.otherClasses;
+            log.info("[{}]   ----- baseline -----", label);
+            log.info("[{}]   total: {} (boot {} + AppCL {} + STCL {} (alive={},dead={}) + other {} (alive={},dead={}))",
+                    label, baselineTotal, baseline.bootstrapClasses, baseline.appClasses,
+                    baseline.subClTotalClasses, baseline.subClAlive, baseline.subClDead,
+                    baseline.otherClasses, baseline.otherAlive, baseline.otherDead);
+        }
+        if (preGc != null) {
+            final long preGcTotal = preGc.bootstrapClasses + preGc.appClasses
+                    + preGc.subClTotalClasses + preGc.otherClasses;
+            log.info("[{}]   ----- pre-GC -----", label);
+            log.info("[{}]   total: {} (boot {} + AppCL {} + STCL {} (alive={},dead={}) + other {} (alive={},dead={}))",
+                    label, preGcTotal, preGc.bootstrapClasses, preGc.appClasses,
+                    preGc.subClTotalClasses, preGc.subClAlive, preGc.subClDead,
+                    preGc.otherClasses, preGc.otherAlive, preGc.otherDead);
+        }
+        {
+            final long postGcTotal = r.bootstrapClasses + r.appClasses
+                    + r.subClTotalClasses + r.otherClasses;
+            log.info("[{}]   ----- post-GC -----", label);
+            log.info("[{}]   total: {} (boot {} + AppCL {} + STCL {} (alive={},dead={}) + other {} (alive={},dead={}))",
+                    label, postGcTotal, r.bootstrapClasses, r.appClasses,
+                    r.subClTotalClasses, r.subClAlive, r.subClDead,
+                    r.otherClasses, r.otherAlive, r.otherDead);
         }
         log.info("[{}] ===========================================================", label);
     }
