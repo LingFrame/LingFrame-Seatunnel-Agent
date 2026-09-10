@@ -102,16 +102,8 @@ pom 文件头有详细注释。**本模块为本机专用，不参与常规 CI/�
 （`mvn clean install -pl :lingframe-agent-dist -am`）。
 
 ```bash
-# 1) 打包本模块（thin jar，含注解处理器生成的 META-INF/BenchmarkList）
-#    本机无 mvn 命令，用 launcher（或等价 mvn 命令）：
-java -classpath "D:/apache-maven-3.9.10/boot/plexus-classworlds-2.9.0.jar" \
-  -Dclassworlds.conf="D:/apache-maven-3.9.10/bin/m2.conf" \
-  -Dmaven.home="D:/apache-maven-3.9.10" \
-  -Dlibrary.jansi.path="D:/apache-maven-3.9.10/lib/jansi-native" \
-  -Dmaven.multiModuleProjectDirectory="E:/Codes/灵珑/lingframe-seatunnel-agent" \
-  org.codehaus.plexus.classworlds.launcher.Launcher \
-  -f "E:/Codes/灵珑/lingframe-seatunnel-agent/pom.xml" -o -B \
-  -DskipTests -Djacoco.skip=true -pl :lingframe-agent-benchmark package
+# 1) 打包本模块（thin jar，含注解处理器生成的 META-INF/BenchmarkList）：
+mvn -o -B -DskipTests -Djacoco.skip=true -pl :lingframe-agent-benchmark package
 
 # 2) 冒烟（机制验证 + 量级）：
 ./run-benchmark.sh -f 1 -wi 1 -i 1 -w 500ms -r 500ms -p sliceMicros=0
@@ -150,8 +142,8 @@ java -classpath "D:/apache-maven-3.9.10/boot/plexus-classworlds-2.9.0.jar" \
 - **包名不得落在 `com.lingframe.agent.*`**：premain 的 ByteBuddy ignore matcher 会排除
   `com.lingframe.agent.` 前缀，落在其下的测试载体永远不会被织入，会虚假测出「零损耗」。
   本模块基准类统一放 `com.lingframe.benchmark`。
-- **SeaTunnel 版本口径**：Agent 基线为 SeaTunnel **2.3.8**；本模块织入的是本地
-  `E:\Codes\seatunnel`（**3.0.0-SNAPSHOT**）构建产物。Agent 切点按全限定类名/方法名匹配，
+- **SeaTunnel 版本口径**：Agent 基线为 SeaTunnel **2.3.13**；本模块织入的是本地
+  `<seatunnel-source-dir>`（**3.0.0-SNAPSHOT**）构建产物。Agent 切点按全限定类名/方法名匹配，
   `AbstractTask` 的 FQN 在 2.x→3.x 未变故可织入，但字段若漂移 ByteBuddy 会静默跳过——
   跑分前后务必核对上面的「织入确认」。
 - `benchmark-governance.yaml` 关闭了限流/熔断：这两者在高频基准下会触发 token 桶限流或

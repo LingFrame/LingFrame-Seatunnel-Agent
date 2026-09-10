@@ -37,7 +37,7 @@ import javax.management.ObjectName;
 /**
  * 治理激活运行器（独立于 {@link LingFrameAgentPremain} 的委托目标）。
  * <p>
- * 双副本根因（JMH governed fork 实测复现）决定了它必须独立成类、且只允许被
+ * 双副本根因决定了它必须独立成类、且只允许被
  * {@code premain()} 以反射方式加载：
  * <ol>
  *   <li>{@code -javaagent} 规范会把 Agent Fat-Jar 自动追加进 system classpath，
@@ -56,6 +56,9 @@ import javax.management.ObjectName;
 public final class LingFrameAgentActivationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(LingFrameAgentActivationRunner.class);
+
+    /** ClassLoader 清理调度器引用——保存以便 Agent 卸载时主动 shutdown */
+    private static ScheduledExecutorService cleanerScheduler;
 
     private static final String CLASSLOADER_SERVICE =
             "org.apache.seatunnel.engine.core.classloader.DefaultClassLoaderService";
@@ -123,7 +126,7 @@ public final class LingFrameAgentActivationRunner {
         try {
             return AgentPipelineFactory.create(config);
         } catch (Exception e) {
-            log.warn("Failed to initialize governance pipeline, falling back to TRACE_ONLY mode: {}", e.getMessage());
+            log.warn("Failed to initialize governance pipeline, falling back to TRACE_ONLY mode", e);
             return null;
         }
     }
@@ -212,7 +215,7 @@ public final class LingFrameAgentActivationRunner {
         try {
             final Class<?> clazz = Class.forName(ABSTRACT_TASK_TYPE);
             for (Field f : clazz.getDeclaredFields()) {
-                if ("jobID".equals(f.getName())
+                if (("jobID".equals(f.getName()) || "jobId".equals(f.getName()))
                         && (f.getType() == long.class || f.getType() == Long.class)) {
                     return true;
                 }
@@ -293,17 +296,17 @@ public final class LingFrameAgentActivationRunner {
                                             .or(ElementMatchers.named("getExecutionContext")),
                                     TaskExecutionServiceCacheAdvice.class.getName()));
             builder.installOn(inst);
-            final ScheduledExecutorService scheduler =
+            cleanerScheduler =
                     Executors.newSingleThreadScheduledExecutor(r -> {
                         final Thread t = new Thread(r, "ling-engine-classloader-cleaner");
                         t.setDaemon(true);
                         return t;
                     });
-            scheduler.scheduleWithFixedDelay(EngineClassLoaderCleaner::cleanFinished, 1, 1, TimeUnit.SECONDS);
+            cleanerScheduler.scheduleWithFixedDelay(EngineClassLoaderCleaner::cleanFinished, 1, 1, TimeUnit.SECONDS);
             log.info("EngineClassLoaderCleanup ENABLED — capturing TaskExecutionService, releasing finished "
                     + "job ClassLoader refs (interval=1s)");
         } catch (Throwable t) {
-            log.warn("EngineClassLoaderCleanup setup FAILED (Metaspace governance degraded): {}", t.getMessage());
+            log.warn("EngineClassLoaderCleanup setup FAILED (Metaspace governance degraded)", t);
         }
     }
 
@@ -435,7 +438,7 @@ public final class LingFrameAgentActivationRunner {
             ManagementFactory.getPlatformMBeanServer().registerMBean(mbean, name);
             log.info("LingFrame Agent observability MBean registered: {}", name);
         } catch (Throwable t) {
-            log.warn("Failed to register observability MBean (agent continues without JMX exposure): {}", t.getMessage());
+            log.warn("Failed to register observability MBean (agent continues without JMX exposure)", t);
         }
     }
 
@@ -467,8 +470,8 @@ public final class LingFrameAgentActivationRunner {
             return withGuard;
         } catch (Exception e) {
             adviceStatus.put("TcclGuard", "FAILED");
-            log.warn("TcclGuardAdvice registration FAILED, TCCL guard degraded to onPhysicalRelease-only mode: {}",
-                    e.getMessage());
+            log.warn("TcclGuardAdvice registration FAILED, TCCL guard degraded to onPhysicalRelease-only mode",
+                    e);
             return builder;
         }
     }

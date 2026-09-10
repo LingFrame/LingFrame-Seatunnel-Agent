@@ -39,7 +39,9 @@ public class LingFrameAgentObservability implements LingFrameAgentObservabilityM
                                       Object adapter) {
         this.config = config;
         // advice 状态为 premain 期确定的快照，防御性拷贝 + 不可变包装，防外部继续变更
-        this.adviceStatus = Collections.unmodifiableMap(new HashMap<>(adviceStatus));
+        this.adviceStatus = adviceStatus != null
+                ? Collections.unmodifiableMap(new HashMap<>(adviceStatus))
+                : Collections.emptyMap();
         this.eventBus = eventBus;
         this.adapter = adapter instanceof SeaTunnelAdapter ? (SeaTunnelAdapter) adapter : null;
     }

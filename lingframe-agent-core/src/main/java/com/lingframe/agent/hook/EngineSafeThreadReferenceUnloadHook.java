@@ -146,7 +146,7 @@ public final class EngineSafeThreadReferenceUnloadHook implements LingUnloadHook
                         lingId, resetCount);
             }
         } catch (Throwable t) {
-            log.warn("[{}] Failed to scan and reset thread context ClassLoaders: {}", lingId, t.getMessage());
+            log.warn("[{}] Failed to scan and reset thread context ClassLoaders", lingId, t);
         }
     }
 
@@ -175,7 +175,7 @@ public final class EngineSafeThreadReferenceUnloadHook implements LingUnloadHook
                         lingId, totalCleared);
             }
         } catch (Throwable t) {
-            log.warn("[{}] Failed to drain worker ThreadLocals: {}", lingId, t.getMessage());
+            log.warn("[{}] Failed to drain worker ThreadLocals", lingId, t);
         }
     }
 

@@ -11,7 +11,7 @@ Agent 真实 `-javaagent` JVM 下的端到端验证套件，包含 Fat-Jar 打�
 | `JobConfigRefreshIT` | 作业级配置热刷：自动发现初始化 / 作业级刷新 / 全局广播与覆盖优先级 | 本地 `mvn verify`（无需 Docker）|
 | `JobLifecycleLeakIT` | 千级作业零残留：1000 作业后灵元/弹性缓存/指标注册表零残留 | 本地 `mvn verify`（约 3.4s，无需 Docker）|
 | `DualJobFaultInjectionIT` | 双作业故障注入：注入隔离 / OPEN→HALF_OPEN→CLOSED 自愈恢复闭环 / fail-closed=false 软退避安全基线 | 本地 `mvn verify`（无需 Docker）|
-| `MetaspaceLeakIT` | Docker Compose 起 SeaTunnel 集群，连续 1000 次作业验证 ClassLoader 物理释放后 Metaspace 零增长 | **CI-only**（需 Docker，本机 `Assumptions` 优雅跳过）|
+| `MetaspaceLeakIT` | Docker Compose 起 SeaTunnel 集群，连续多轮作业验证 ClassLoader 物理释放后 Metaspace 零增长（默认 90 job，可参数化扩展） | **CI-only**（需 Docker，本机 `Assumptions` 优雅跳过）|
 
 ## 资源文件
 

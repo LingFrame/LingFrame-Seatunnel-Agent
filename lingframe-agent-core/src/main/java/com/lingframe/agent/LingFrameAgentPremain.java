@@ -99,7 +99,7 @@ public final class LingFrameAgentPremain {
             log.info("Bridge JAR ({} bytes) appended to Bootstrap ClassLoader search: {}",
                     bridgeJar.length(), bridgeJar.getAbsolutePath());
         } catch (Exception e) {
-            log.warn("Failed to append Bridge JAR to Bootstrap ClassLoader: {}", e.getMessage());
+            log.warn("Failed to append Bridge JAR to Bootstrap ClassLoader", e);
         }
     }
 
@@ -110,6 +110,7 @@ public final class LingFrameAgentPremain {
      * @return 包含 Bridge 类的临时 JAR，若无 Bridge 类则返回 null
      */
     private static File extractBridgeJar(File fatJar) throws Exception {
+        cleanupStaleTempJars();
         final File tempJar = File.createTempFile("lingframe-agent-bridge-", ".jar");
         boolean hasBridgeClass = false;
         try (JarFile jarFile = new JarFile(fatJar);
@@ -142,6 +143,24 @@ public final class LingFrameAgentPremain {
         }
         tempJar.deleteOnExit();
         return tempJar;
+    }
+
+    /** 清理上次 JVM crash 残留的临时 Bridge JAR（deleteOnExit 仅在正常退出时生效）。 */
+    private static void cleanupStaleTempJars() {
+        try {
+            final File tempDir = new File(System.getProperty("java.io.tmpdir"));
+            final File[] stale = tempDir.listFiles((dir, name) ->
+                    name.startsWith("lingframe-agent-bridge-") && name.endsWith(".jar"));
+            if (stale != null) {
+                for (File f : stale) {
+                    if (f.delete()) {
+                        log.debug("Cleaned up stale temp JAR: {}", f.getAbsolutePath());
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            // best-effort，不阻塞 Agent 启动
+        }
     }
 
     private LingFrameAgentPremain() {

@@ -31,15 +31,19 @@ public final class ClassLoaderReleaseAdvice {
     ) {
         // 从 cache 中精确提取目标 ClassLoader 并登记追踪
         // SeaTunnel 在 cacheMode=true 时将 jobId 重定向到 1L，此处须对齐
-        final long effectiveJobId = cacheMode ? 1L : jobId;
-        final Map<String, ClassLoader> jobMap = cache.get(effectiveJobId);
-        if (jobMap == null) {
-            return;
-        }
-        final String key = LingFrameAgentBridge.convertJarsToKey(jars);
-        final ClassLoader cl = jobMap.get(key);
-        if (cl != null && !cacheMode && jobId > 0) {
-            EngineClassLoaderCleaner.trackJobClassLoader(jobId, cl);
+        try {
+            final long effectiveJobId = cacheMode ? 1L : jobId;
+            final Map<String, ClassLoader> jobMap = cache.get(effectiveJobId);
+            if (jobMap == null) {
+                return;
+            }
+            final String key = LingFrameAgentBridge.convertJarsToKey(jars);
+            final ClassLoader cl = jobMap.get(key);
+            if (cl != null && !cacheMode && jobId > 0) {
+                EngineClassLoaderCleaner.trackJobClassLoader(jobId, cl);
+            }
+        } catch (Throwable ignored) {
+            // fail-open: advice 异常不得传播到宿主引擎
         }
     }
 

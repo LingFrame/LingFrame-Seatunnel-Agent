@@ -83,7 +83,7 @@ public final class AgentPipelineFactory {
      */
     public static AgentGovernanceRuntime create(AgentConfig agentConfig) {
         final boolean devMode = agentConfig != null && agentConfig.isDevMode();
-        final boolean permissionEnabled = agentConfig == null || agentConfig.isPermissionEnabled();
+        final boolean permissionEnabled = agentConfig != null && agentConfig.isPermissionEnabled();
         final boolean resilienceEnabled = agentConfig == null
                 || agentConfig.isCircuitBreakerEnabled()
                 || agentConfig.isRateLimiterEnabled();
@@ -102,6 +102,13 @@ public final class AgentPipelineFactory {
         final EventBus eventBus = new EventBus();
         final RuntimeCoordinator runtimeCoordinator = new RuntimeCoordinator(eventBus);
         runtimeCoordinator.start();
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                runtimeCoordinator.stop();
+            } catch (Throwable ignored) {
+                // fail-open: shutdown hook 异常不得传播
+            }
+        }, "lingframe-runtime-coordinator-shutdown"));
         final LocalGovernanceRegistry governanceRegistry = resilienceEnabled
                 ? new LocalGovernanceRegistry(eventBus)
                 : null;
@@ -165,7 +172,7 @@ public final class AgentPipelineFactory {
         configCenter.tryInit();
 
         return new AgentGovernanceRuntime(pipelineEngine, unloadCoordinator, lingRepository, configCenter,
-                eventBus, metricsCollector, virtualLingManager);
+                eventBus, metricsCollector, virtualLingManager, runtimeCoordinator);
     }
 
     /**
@@ -233,8 +240,8 @@ public final class AgentPipelineFactory {
                     runtimeConfig.getCircuitBreakerSlidingWindowSize());
             return virtualLingManager;
         } catch (Exception e) {
-            log.warn("Failed to register virtual ling [{}], resilience filters will degrade to passthrough: {}",
-                    VIRTUAL_LING_ID, e.getMessage());
+            log.warn("Failed to register virtual ling [{}], resilience filters will degrade to passthrough",
+                    VIRTUAL_LING_ID, e);
             return null;
         }
     }

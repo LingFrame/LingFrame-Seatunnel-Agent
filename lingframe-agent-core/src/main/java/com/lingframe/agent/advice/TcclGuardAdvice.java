@@ -27,8 +27,12 @@ public final class TcclGuardAdvice {
 
     @Advice.OnMethodEnter
     public static void onEnter(@Advice.Argument(value = 0, readOnly = false) ClassLoader loader) {
-        if (loader != null && ReleasedClassLoaderRegistry.isReleased(loader)) {
-            loader = loader.getParent();
+        try {
+            if (loader != null && ReleasedClassLoaderRegistry.isReleased(loader)) {
+                loader = loader.getParent();
+            }
+        } catch (Throwable ignored) {
+            // fail-open: advice 异常不得传播到宿主引擎
         }
     }
 

@@ -1,6 +1,7 @@
 package com.lingframe.agent.config;
 
 import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,6 +37,15 @@ public final class AgentConfig {
 
     /** 熔断器窗口内最小调用数默认值（与灵核 LingRuntimeConfig 默认一致）。 */
     private static final int MINIMUM_CALLS_DEFAULT = 10;
+
+    /** 作业级灵元硬上限默认值。 */
+    private static final int PER_JOB_MAX_TRACKED_JOBS_DEFAULT = 1024;
+
+    /** 作业空闲 TTL 默认值（30 分钟）。 */
+    private static final long PER_JOB_IDLE_TTL_MS_DEFAULT = 1_800_000L;
+
+    /** 作业回收扫描间隔默认值（5 分钟）。 */
+    private static final long PER_JOB_REAP_INTERVAL_MS_DEFAULT = 300_000L;
 
     private final boolean governanceEnabled;
     private final boolean circuitBreakerEnabled;
@@ -92,7 +102,7 @@ public final class AgentConfig {
                 circuitBreakerFailureRateThreshold, circuitBreakerSlidingWindowSize,
                 MINIMUM_CALLS_DEFAULT, defaultTimeoutMs,
                 failClosed,
-                true, 1024, 1_800_000L, 300_000L,
+                true, PER_JOB_MAX_TRACKED_JOBS_DEFAULT, PER_JOB_IDLE_TTL_MS_DEFAULT, PER_JOB_REAP_INTERVAL_MS_DEFAULT,
                 "INFO", "INFO", 1, false,
                 true, Collections.emptyList(), Collections.emptyList());
     }
@@ -175,12 +185,12 @@ public final class AgentConfig {
             return defaults();
         }
         try (InputStream is = new FileInputStream(configPath)) {
-            final Yaml yaml = new Yaml();
+            final Yaml yaml = new Yaml(new SafeConstructor());
             final Map<String, Object> root = yaml.load(is);
             return fromMap(root != null ? root : Collections.emptyMap());
         } catch (IOException | RuntimeException e) {
-            log.warn("Failed to load governance config from {}, using defaults. Error: {}",
-                    configPath, e.getMessage());
+            log.warn("Failed to load governance config from {}, using defaults",
+                    configPath, e);
             return defaults();
         }
     }
@@ -239,9 +249,9 @@ public final class AgentConfig {
                 toInt(resilience.getOrDefault("default-timeout-ms", 3000)),
                 toBoolean(resilience.getOrDefault("fail-closed", false)),
                 toBoolean(governance.getOrDefault("per-job-governance-enabled", true)),
-                toInt(governance.getOrDefault("per-job-max-tracked-jobs", 1024)),
-                toLong(governance.getOrDefault("per-job-idle-ttl-ms", 1_800_000L)),
-                toLong(governance.getOrDefault("per-job-reap-interval-ms", 300_000L)),
+                toInt(governance.getOrDefault("per-job-max-tracked-jobs", PER_JOB_MAX_TRACKED_JOBS_DEFAULT)),
+                toLong(governance.getOrDefault("per-job-idle-ttl-ms", PER_JOB_IDLE_TTL_MS_DEFAULT)),
+                toLong(governance.getOrDefault("per-job-reap-interval-ms", PER_JOB_REAP_INTERVAL_MS_DEFAULT)),
                 traceLevel, auditLevel, sampleRate, timing,
                 toBoolean(resilience.getOrDefault("classifier-enabled", true)),
                 toStringList(resilience.getOrDefault("downstream-readable-failures-patterns", Collections.emptyList())),
