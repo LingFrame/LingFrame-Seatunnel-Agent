@@ -27,6 +27,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -371,18 +372,19 @@ class SeaTunnelAdapterTest {
             // 首次调用：立即尝试初始化。测试环境无 Hazelcast 实例，tryInit 必然失败，
             // 但必须已推后下次重试时间——原实现用布尔标记一次性封死，本断言即回归防线
             adapter.beforeTaskCall();
-            final long firstRetryAt = (long) retryAtField.get(adapter);
+            final AtomicLong retryAt = (AtomicLong) retryAtField.get(adapter);
+            final long firstRetryAt = retryAt.get();
             assertThat(firstRetryAt).isGreaterThan(System.currentTimeMillis());
             assertThat(configCenter.isInitialized()).isFalse();
 
             // 节流窗口内再次调用不应重复探测（重试时间保持不变）
             adapter.beforeTaskCall();
-            assertThat((long) retryAtField.get(adapter)).isEqualTo(firstRetryAt);
+            assertThat(retryAt.get()).isEqualTo(firstRetryAt);
 
             // 模拟重试间隔已过，应再次尝试初始化并重新推后重试时间
-            retryAtField.setLong(adapter, 0L);
+            retryAt.set(0L);
             adapter.beforeTaskCall();
-            assertThat((long) retryAtField.get(adapter)).isGreaterThan(System.currentTimeMillis());
+            assertThat(retryAt.get()).isGreaterThan(System.currentTimeMillis());
         }
 
         @Test

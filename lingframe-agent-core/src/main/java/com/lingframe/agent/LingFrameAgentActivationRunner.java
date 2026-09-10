@@ -57,6 +57,9 @@ public final class LingFrameAgentActivationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(LingFrameAgentActivationRunner.class);
 
+    /** ClassLoader 清理调度器引用——保存以便 Agent 卸载时主动 shutdown */
+    private static ScheduledExecutorService cleanerScheduler;
+
     private static final String CLASSLOADER_SERVICE =
             "org.apache.seatunnel.engine.core.classloader.DefaultClassLoaderService";
     private static final String ABSTRACT_TASK_TYPE =
@@ -293,13 +296,13 @@ public final class LingFrameAgentActivationRunner {
                                             .or(ElementMatchers.named("getExecutionContext")),
                                     TaskExecutionServiceCacheAdvice.class.getName()));
             builder.installOn(inst);
-            final ScheduledExecutorService scheduler =
+            cleanerScheduler =
                     Executors.newSingleThreadScheduledExecutor(r -> {
                         final Thread t = new Thread(r, "ling-engine-classloader-cleaner");
                         t.setDaemon(true);
                         return t;
                     });
-            scheduler.scheduleWithFixedDelay(EngineClassLoaderCleaner::cleanFinished, 1, 1, TimeUnit.SECONDS);
+            cleanerScheduler.scheduleWithFixedDelay(EngineClassLoaderCleaner::cleanFinished, 1, 1, TimeUnit.SECONDS);
             log.info("EngineClassLoaderCleanup ENABLED — capturing TaskExecutionService, releasing finished "
                     + "job ClassLoader refs (interval=1s)");
         } catch (Throwable t) {

@@ -89,7 +89,7 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
     /** 本次批次解析出的目标灵元 ID（beforeTaskCall 设置，afterTaskCall 读取用于回灌同一作业灵元）。 */
     private final ThreadLocal<String> currentLingId = new ThreadLocal<>();
     /** Hazelcast 配置中心下一次允许重试初始化时间戳（毫秒），用于失败重试节流 */
-    private volatile long nextConfigCenterRetryAt;
+    private final AtomicLong nextConfigCenterRetryAt = new AtomicLong();
     private volatile boolean eventSubscribed;
 
     /* ==================== 可观测性：per-call 钩子耗时埋点（timing-enabled=true 时启用，默认零损耗） ==================== */
@@ -585,10 +585,10 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
             return;
         }
         final long now = System.currentTimeMillis();
-        if (now < nextConfigCenterRetryAt) {
+        if (now < nextConfigCenterRetryAt.get()) {
             return;
         }
-        nextConfigCenterRetryAt = now + CONFIG_CENTER_RETRY_INTERVAL_MS;
+        nextConfigCenterRetryAt.set(now + CONFIG_CENTER_RETRY_INTERVAL_MS);
         try {
             configCenter.tryInit();
         } catch (Throwable t) {

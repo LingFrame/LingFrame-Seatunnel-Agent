@@ -176,52 +176,14 @@ public final class EngineClassLoaderCleaner {
             return;
         }
         try {
-            final Set<Long> completedJobIds = new HashSet<>();
-            int cleaned = 0;
-            // 清理 finishedExecutionContexts
-            final Object finishedValue = readFieldValue(target, FIELD_FINISHED);
-            if (finishedValue instanceof Map) {
-                final Map<?, ?> finished = (Map<?, ?>) finishedValue;
-                if (!finished.isEmpty()) {
-                    final Iterator<? extends Map.Entry<?, ?>> iterator = finished.entrySet().iterator();
-                    while (iterator.hasNext()) {
-                        final Map.Entry<?, ?> entry = iterator.next();
-                        final Object key = entry.getKey();
-                        if (key != null) {
-                            final long jobId = extractJobId(key);
-                            if (jobId > 0) {
-                                completedJobIds.add(jobId);
-                            }
-                        }
-                        final Object ctx = entry.getValue();
-                        if (ctx != null) {
-                            cleanContextFields(ctx);
-                        }
-                        iterator.remove();
-                        cleaned++;
-                    }
-                }
-            }
-            // 注意：executionContexts 是正在执行中的作业上下文，绝不能被定时清理器移除。
-            // 之前这里无条件清除 executionContexts 导致 AssignSplitOperation 找不到目标 TaskGroup，
-            // 作业卡在 "wait split!" 无法完成。已删除该清理逻辑，让引擎自行管理正在执行中的上下文。
-            if (cleaned > 0) {
-                final long total = CLEANED_COUNT.addAndGet(cleaned);
-                log.info("EngineClassLoaderCleaner purged {} task-context entries (total: {})",
-                        cleaned, total);
-            }
+            final Set<Long> completedJobIds = purgeFinishedExecutionContexts(target);
+
             // 联动强制排空已完成作业在 DefaultClassLoaderService 中可能异常残留的 ClassLoader 缓存
             // 注意：finishedExecutionContexts 是任务级完成，job 可能仍在 RUNNING。
             // 跳过仍在 runningJobMasterMap 中的活跃作业，避免 ClassLoader 释放与
             // 任务完成通知竞态导致 job 永远卡在 RUNNING（CI flaky root cause）。
             final Set<Long> activeJobIds = collectActiveJobIds();
-            for (Long jobId : completedJobIds) {
-                if (activeJobIds != null && activeJobIds.contains(jobId)) {
-                    continue;
-                }
-                forceEvictJobClassLoaders(jobId);
-            }
-
+            evictNonActiveClassLoaders(completedJobIds, activeJobIds);
 
             // Fallback：如果 coordinatorService 未被 advice 捕获，通过 NodeEngine 主动获取
             tryCaptureCoordinatorService();
@@ -238,12 +200,7 @@ public final class EngineClassLoaderCleaner {
             // 对 executionContexts 清理新增的 completedJobIds 联动 forceEvict
             // cleanStaleExecutionContexts 内部已用 activeJobIds 过滤，新增的 jobId 保证非活跃。
             // 但原始 completedJobIds 仍含 finishedExecutionContexts 的任务级完成 ID，需再次过滤。
-            for (Long jobId : completedJobIds) {
-                if (activeJobIds != null && activeJobIds.contains(jobId)) {
-                    continue;
-                }
-                forceEvictJobClassLoaders(jobId);
-            }
+            evictNonActiveClassLoaders(completedJobIds, activeJobIds);
 
             // 全局清理 ObjectStreamClass$Caches 中所有非系统 ClassLoader 的缓存条目。
             // forceEvictJobClassLoaders 中的按 ClassLoader 清理可能因 toRelease 为空而遗漏，
@@ -252,6 +209,64 @@ public final class EngineClassLoaderCleaner {
         } catch (Throwable t) {
             log.warn("EngineClassLoaderCleaner finished-context clean skipped (engine version mismatch?)",
                     t);
+        }
+    }
+
+    /**
+     * 从 finishedExecutionContexts 中排空已完成的任务上下文，收集已完成作业 ID 集合。
+     *
+     * @param target TaskExecutionService 实例
+     * @return 已完成作业 ID 集合（可能为空，不含活跃作业）
+     */
+    private static Set<Long> purgeFinishedExecutionContexts(Object target) throws Exception {
+        final Set<Long> completedJobIds = new HashSet<>();
+        int cleaned = 0;
+        final Object finishedValue = readFieldValue(target, FIELD_FINISHED);
+        if (finishedValue instanceof Map) {
+            final Map<?, ?> finished = (Map<?, ?>) finishedValue;
+            if (!finished.isEmpty()) {
+                final Iterator<? extends Map.Entry<?, ?>> iterator = finished.entrySet().iterator();
+                while (iterator.hasNext()) {
+                    final Map.Entry<?, ?> entry = iterator.next();
+                    final Object key = entry.getKey();
+                    if (key != null) {
+                        final long jobId = extractJobId(key);
+                        if (jobId > 0) {
+                            completedJobIds.add(jobId);
+                        }
+                    }
+                    final Object ctx = entry.getValue();
+                    if (ctx != null) {
+                        cleanContextFields(ctx);
+                    }
+                    iterator.remove();
+                    cleaned++;
+                }
+            }
+        }
+        // 注意：executionContexts 是正在执行中的作业上下文，绝不能被定时清理器移除。
+        // 之前这里无条件清除 executionContexts 导致 AssignSplitOperation 找不到目标 TaskGroup，
+        // 作业卡在 "wait split!" 无法完成。已删除该清理逻辑，让引擎自行管理正在执行中的上下文。
+        if (cleaned > 0) {
+            final long total = CLEANED_COUNT.addAndGet(cleaned);
+            log.info("EngineClassLoaderCleaner purged {} task-context entries (total: {})",
+                    cleaned, total);
+        }
+        return completedJobIds;
+    }
+
+    /**
+     * 对非活跃作业强制排空其 ClassLoader 缓存。跳过仍在 runningJobMasterMap 中的活跃作业。
+     *
+     * @param jobIds      待清理的作业 ID 集合
+     * @param activeJobIds 活跃作业 ID 集合（null 视为无活跃作业）
+     */
+    private static void evictNonActiveClassLoaders(Set<Long> jobIds, Set<Long> activeJobIds) {
+        for (Long jobId : jobIds) {
+            if (activeJobIds != null && activeJobIds.contains(jobId)) {
+                continue;
+            }
+            forceEvictJobClassLoaders(jobId);
         }
     }
 
@@ -631,14 +646,16 @@ public final class EngineClassLoaderCleaner {
      */
     private static int cleanObjectStreamClassCacheMap(Map<?, ?> cacheMap, ClassLoader targetCl) {
         int removed = 0;
-        for (Map.Entry<?, ?> entry : cacheMap.entrySet()) {
+        final Iterator<? extends Map.Entry<?, ?>> it = cacheMap.entrySet().iterator();
+        while (it.hasNext()) {
+            final Map.Entry<?, ?> entry = it.next();
             final Object key = entry.getKey();
             final Object value = entry.getValue();
 
             // 检查 key (WeakReference<Class<?>>) 的 referent
             final Class<?> keyClass = getReferenceReferentAsClass(key);
             if (keyClass != null && keyClass.getClassLoader() == targetCl) {
-                cacheMap.remove(key);
+                it.remove();
                 removed++;
                 continue;
             }
@@ -646,7 +663,7 @@ public final class EngineClassLoaderCleaner {
             // 检查 value (SoftReference<ObjectStreamClass>) 的 referent.cl
             final Class<?> valueClass = getObjectStreamClassReferentClass(value);
             if (valueClass != null && valueClass.getClassLoader() == targetCl) {
-                cacheMap.remove(key);
+                it.remove();
                 removed++;
             }
         }
