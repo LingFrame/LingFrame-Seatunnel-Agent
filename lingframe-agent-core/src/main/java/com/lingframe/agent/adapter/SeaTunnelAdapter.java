@@ -1,17 +1,16 @@
 package com.lingframe.agent.adapter;
 
+import com.lingframe.agent.bridge.LingFrameAgentBridge;
 import com.lingframe.agent.bridge.LingGovernanceContract;
 import com.lingframe.agent.bridge.ReleasedClassLoaderRegistry;
 import com.lingframe.agent.cleaner.EngineClassLoaderCleaner;
 import com.lingframe.agent.hook.EngineSafeThreadReferenceUnloadHook;
 import com.lingframe.agent.config.AgentConfig;
 import com.lingframe.agent.config.HazelcastConfigCenter;
-import com.lingframe.api.event.LingEventListener;
 import com.lingframe.api.exception.LingInvocationException;
 import com.lingframe.api.exception.LingInvocationException.ErrorKind;
 import com.lingframe.api.security.AccessType;
 import com.lingframe.core.event.EventBus;
-import com.lingframe.core.event.monitor.MonitoringEvents;
 import com.lingframe.core.ling.LingUnloadCoordinator;
 import com.lingframe.core.metrics.MetricsCollector;
 import com.lingframe.core.pipeline.InvocationContext;
@@ -24,11 +23,8 @@ import java.net.URL;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Locale;
-import java.util.stream.Collectors;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.LongAccumulator;
-import java.util.regex.Pattern;
 
 /**
  * SeaTunnel 上下文到 LingFrame 治理微内核的适配器。
@@ -63,8 +59,6 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
     /** Hazelcast 配置中心初始化失败后的重试间隔（毫秒）——实例就绪前避免每个批次都探测一次 */
     private static final long CONFIG_CENTER_RETRY_INTERVAL_MS = 5_000L;
 
-    /** Trace 失败 action 中的耗时片段（如 {@code taskCall (5ms)}），归一化后用于失败签名去重 */
-    private static final Pattern TRACE_COST_CLEANER = Pattern.compile("\\(\\d+\\s*ms\\)");
 
     private final AgentConfig config;
     private final InvocationPipelineEngine pipelineEngine;
@@ -90,23 +84,13 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
     private final ThreadLocal<String> currentLingId = new ThreadLocal<>();
     /** Hazelcast 配置中心下一次允许重试初始化时间戳（毫秒），用于失败重试节流 */
     private final AtomicLong nextConfigCenterRetryAt = new AtomicLong();
-    private volatile boolean eventSubscribed;
 
     /* ==================== 可观测性：per-call 钩子耗时埋点（timing-enabled=true 时启用，默认零损耗） ==================== */
-    private final AtomicLong hookCallCount = new AtomicLong();
-    private final AtomicLong hookLatencySumNanos = new AtomicLong();
-    /** 耗时 min/max 用 LongAccumulator 无锁累加，替代 synchronized（timing 高频路径避免锁竞争） */
-    private final LongAccumulator hookLatencyMinNanos = new LongAccumulator(Long::min, Long.MAX_VALUE);
-    private final LongAccumulator hookLatencyMaxNanos = new LongAccumulator(Long::max, Long.MIN_VALUE);
+    private final HookLatencyTracker hookLatencyTracker = new HookLatencyTracker();
     /** beforeTaskCall 钩子耗时（ThreadLocal，afterTaskCall 合并累加到全局统计） */
     private final ThreadLocal<Long> beforeCostNanos = new ThreadLocal<>();
-    /** Trace/Audit 事件日志采样计数器（按 log-sample-rate 抽样，降低高 QPS 日志压力） */
-    private final AtomicLong traceLogCounter = new AtomicLong();
-    private final AtomicLong auditLogCounter = new AtomicLong();
-    /** Trace 失败事件窗口限频器：熔断风暴等高重复失败仍逐条落 INFO 会引爆日志，仅失败轨迹接入 */
-    private final TraceLogThrottle traceErrorThrottle = new TraceLogThrottle();
-    /** 失败审计事件窗口限频器：失败审计与 Trace 失败同根（熔断拒绝等），按签名收敛抑制同类重复，成功审计仍走采样率 */
-    private final TraceLogThrottle auditFailThrottle = new TraceLogThrottle();
+    /** Pipeline 事件订阅器（Trace/Audit/CircuitBreaker） */
+    private final PipelineEventSubscriber pipelineEventSubscriber = new PipelineEventSubscriber();
     /** 治理拒绝告警窗口限频器：熔断/限流风暴下避免 Worker 调度循环产生海量告警日志刷屏 */
     private final TraceLogThrottle rejectionThrottle = new TraceLogThrottle();
 
@@ -163,12 +147,7 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
 
     @Override
     public String convertJarsToKey(Collection<URL> jars) {
-        // 与 SeaTunnel 官方 DefaultClassLoaderService.buildClassLoaderKey 保持严格一致
-        // 使用 sorted() + Collectors.joining() 拼接，确保在 releaseClassLoader 切面拦截时精确命中 key
-        if (jars == null || jars.isEmpty()) {
-            return "";
-        }
-        return jars.stream().map(URL::toString).sorted().collect(Collectors.joining());
+        return LingFrameAgentBridge.buildClassLoaderKey(jars);
     }
 
     /** 兼容便捷入口：无 task 上下文时按共享灵元处理。 */
@@ -181,7 +160,7 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
         final long hookT0 = config.isTimingEnabled() ? System.nanoTime() : 0L;
         try {
             ensureConfigCenterInit();
-            subscribePipelineEventsIfNeeded();
+            pipelineEventSubscriber.subscribeIfNeeded(eventBus, config);
             callStartTime.set(System.nanoTime());
             // 解析本次批次的目标灵元（作业级或共享）；供 invoke 与 afterTaskCall 回灌一致使用
             final String targetLingId = resolveTargetLingId(task);
@@ -367,7 +346,7 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
                 final long afterCost = System.nanoTime() - hookT0;
                 final Long beforeCost = beforeCostNanos.get();
                 beforeCostNanos.remove();
-                recordHookLatency(afterCost + (beforeCost != null ? beforeCost : 0L));
+                hookLatencyTracker.recordLatency(afterCost + (beforeCost != null ? beforeCost : 0L));
             }
         }
     }
@@ -480,90 +459,7 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
     }
 
     /**
-     * 订阅 Pipeline 的 Trace/Event 监控事件。
-     * <p>
-     * 全局订阅（不绑定 lingId），因为 SeaTunnel Agent 是框架级组件。
-     * 事件转发到日志，供运维排障和 Dashboard 消费。
-     */
-    private void subscribePipelineEventsIfNeeded() {
-        if (eventSubscribed || eventBus == null) {
-            return;
-        }
-        eventSubscribed = true;
-        try {
-            eventBus.subscribeGlobal(MonitoringEvents.TraceLogEvent.class,
-                    (LingEventListener<MonitoringEvents.TraceLogEvent>) event -> {
-                        if (!config.isTraceLogEnabled()) {
-                            return;
-                        }
-                        // 失败类 Trace 走「按签名 + 时间窗口」限频：熔断 OPEN 等故障形态下同一资源
-                        // 会在极短时间同毫秒内高频重复产生同类 ERROR 事件，逐条落 INFO 会引爆日志量
-                        //（数十 MB / 十数万行）。归一化 action 里的耗时片段后按 (lingId,type,action)
-                        // 在窗口内限频，其余抑制并累计计数；成功轨迹（IN/OUT）仍按全局采样。
-                        if (isTraceError(event)) {
-                            if (!traceErrorThrottle.tryAcquire(traceErrorKey(event), System.currentTimeMillis())) {
-                                return;
-                            }
-                        } else if (traceLogCounter.getAndIncrement() % config.getLogSampleRate() != 0) {
-                            return;
-                        }
-                        // 已禁用 Trace 打印：全矩阵 E2E 下 Trace 即便限频仍持续产生日志，
-                        // 属运维审计类噪音，改以限频计数（suppressedCount）观测，后续可恢复打印。
-                    });
-            eventBus.subscribeGlobal(MonitoringEvents.AuditLogEvent.class,
-                    (LingEventListener<MonitoringEvents.AuditLogEvent>) event -> {
-                        if (!config.isAuditLogEnabled()) {
-                            return;
-                        }
-                        // 失败审计（熔断拒绝等）与 Trace 失败同根，按签名+时间窗口限频抑制同类重复；
-                        // 成功审计保持全局采样率降频。
-                        if (!event.isSuccess()) {
-                            if (!auditFailThrottle.tryAcquire(auditFailKey(event), System.currentTimeMillis())) {
-                                return;
-                            }
-                        } else if (auditLogCounter.getAndIncrement() % config.getLogSampleRate() != 0) {
-                            return;
-                        }
-                        // 已禁用 Audit 打印：与 Trace 同理审计类日志在全矩阵下污染日志，
-                        // 改以限频计数（suppressedCount）观测，后续可恢复打印。
-                    });
-            eventBus.subscribeGlobal(MonitoringEvents.CircuitBreakerStateEvent.class,
-                    (LingEventListener<MonitoringEvents.CircuitBreakerStateEvent>) event ->
-                            log.warn("[CircuitBreaker] resourceId={}, {} -> {}, failureRate={}%",
-                                    event.getResourceId(), event.getOldState(),
-                                    event.getNewState(), event.getFailureRate()));
-            log.info("Pipeline event subscriptions registered: TraceLog, AuditLog, CircuitBreakerState");
-        } catch (Exception e) {
-            log.warn("Failed to subscribe pipeline events", e);
-        }
-    }
 
-    /** 是否为失败类 Trace 事件（熔断拒绝等 ERROR 轨迹，需要限频抑制重复打印）。 */
-    private boolean isTraceError(MonitoringEvents.TraceLogEvent event) {
-        return "ERROR".equalsIgnoreCase(event.getType());
-    }
-
-    /**
-     * 归一化失败 Trace 的限频签名。
-     * 归一化 action 中的耗时片段（如 {@code taskCall (5ms)} -> {@code taskCall}），
-     * 使同签名不同耗时的重复失败命中同一窗口限频，而非各自计成新签名。
-     */
-    private String traceErrorKey(MonitoringEvents.TraceLogEvent event) {
-        final String action = event.getAction() == null
-                ? "" : TRACE_COST_CLEANER.matcher(event.getAction()).replaceAll("");
-        return event.getLingId() + "|" + event.getType() + "|" + action;
-    }
-
-    /**
-     * 归一化失败审计的限频签名。
-     * 熔断拒绝等失败审计中异常信息（failureReason）多态易变，仅取稳定维度（lingId, action, resource）
-     * 收敛同类失败，使同一资源被熔断拒绝时命中同一窗口限频，而非每条计成新签名。
-     */
-    private String auditFailKey(MonitoringEvents.AuditLogEvent event) {
-        return event.getLingId() + "|" + event.getAction() + "|" + event.getResource();
-    }
-
-    /**
      * 延迟初始化 Hazelcast 配置中心，失败后按间隔重试直到成功。
      * <p>
      * 时序约束：Agent premain 在 SeaTunnel 启动之前执行，此时 Hazelcast 实例尚未创建，
@@ -602,38 +498,29 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
 
     /* ==================== 可观测性 getter（供 JMX MBean 读取） ==================== */
 
-    private void recordHookLatency(long nanos) {
-        hookCallCount.incrementAndGet();
-        hookLatencySumNanos.addAndGet(nanos);
-        hookLatencyMinNanos.accumulate(nanos);
-        hookLatencyMaxNanos.accumulate(nanos);
-    }
-
     public long getHookCallCount() {
-        return hookCallCount.get();
+        return hookLatencyTracker.getCallCount();
     }
 
     /** 被 Trace 失败限频器抑制（未打印）的失败事件累计计数，供可观测与测试断言。 */
     public long getTraceErrorSuppressedCount() {
-        return traceErrorThrottle.suppressedCount();
+        return pipelineEventSubscriber.getTraceErrorSuppressedCount();
     }
 
     /** 返回已被窗口限频抑制的失败审计条数（供运维/测试观测）。 */
     public long getAuditFailSuppressedCount() {
-        return auditFailThrottle.suppressedCount();
+        return pipelineEventSubscriber.getAuditFailSuppressedCount();
     }
 
     public long getHookLatencyAvgNanos() {
-        final long c = hookCallCount.get();
-        return c > 0 ? hookLatencySumNanos.get() / c : 0L;
+        return hookLatencyTracker.getLatencyAvgNanos();
     }
 
     public long getHookLatencyMinNanos() {
-        final long m = hookLatencyMinNanos.get();
-        return m == Long.MAX_VALUE ? 0L : m;
+        return hookLatencyTracker.getLatencyMinNanos();
     }
 
     public long getHookLatencyMaxNanos() {
-        return hookLatencyMaxNanos.get();
+        return hookLatencyTracker.getLatencyMaxNanos();
     }
 }

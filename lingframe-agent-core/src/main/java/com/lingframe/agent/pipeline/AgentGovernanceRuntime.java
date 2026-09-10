@@ -2,6 +2,7 @@ package com.lingframe.agent.pipeline;
 
 import com.lingframe.agent.config.HazelcastConfigCenter;
 import com.lingframe.core.event.EventBus;
+import com.lingframe.core.fsm.RuntimeCoordinator;
 import com.lingframe.core.ling.LingRepository;
 import com.lingframe.core.ling.LingUnloadCoordinator;
 import com.lingframe.core.ling.VirtualLingManager;
@@ -31,6 +32,8 @@ public final class AgentGovernanceRuntime {
     private final MetricsCollector metricsCollector;
     /** 虚拟灵元注册入口（作业级治理复用：共享灵元 + 作业灵元统一经此注册/注销；resilience 关闭时为 null）。 */
     private final VirtualLingManager virtualLingManager;
+    /** FSM 协调器（Agent 卸载时需 stop 释放线程资源） */
+    private final RuntimeCoordinator runtimeCoordinator;
 
     public AgentGovernanceRuntime(InvocationPipelineEngine pipelineEngine,
                                   LingUnloadCoordinator unloadCoordinator,
@@ -38,7 +41,8 @@ public final class AgentGovernanceRuntime {
                                   HazelcastConfigCenter configCenter,
                                   EventBus eventBus,
                                   MetricsCollector metricsCollector,
-                                  VirtualLingManager virtualLingManager) {
+                                  VirtualLingManager virtualLingManager,
+                                  RuntimeCoordinator runtimeCoordinator) {
         this.pipelineEngine = pipelineEngine;
         this.unloadCoordinator = unloadCoordinator;
         this.lingRepository = lingRepository;
@@ -46,6 +50,7 @@ public final class AgentGovernanceRuntime {
         this.eventBus = eventBus;
         this.metricsCollector = metricsCollector;
         this.virtualLingManager = virtualLingManager;
+        this.runtimeCoordinator = runtimeCoordinator;
     }
 
     public InvocationPipelineEngine getPipelineEngine() {
@@ -74,5 +79,16 @@ public final class AgentGovernanceRuntime {
 
     public VirtualLingManager getVirtualLingManager() {
         return virtualLingManager;
+    }
+
+    public RuntimeCoordinator getRuntimeCoordinator() {
+        return runtimeCoordinator;
+    }
+
+    /** 停止 FSM 协调器，释放线程资源。 */
+    public void stop() {
+        if (runtimeCoordinator != null) {
+            runtimeCoordinator.stop();
+        }
     }
 }

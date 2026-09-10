@@ -61,10 +61,19 @@ public final class LingFrameAgentBridge {
 
     public static String convertJarsToKey(Collection<URL> jars) {
         final LingGovernanceContract c = contract;
-        return c != null ? c.convertJarsToKey(jars)
-                // 兜底与官方 DefaultClassLoaderService.buildClassLoaderKey 保持严格一致
-                : (jars == null || jars.isEmpty()) ? ""
-                : jars.stream().map(URL::toString).sorted().collect(Collectors.joining());
+        return c != null ? c.convertJarsToKey(jars) : buildClassLoaderKey(jars);
+    }
+
+    /**
+     * 构建 ClassLoader 缓存 key——与 SeaTunnel 官方 DefaultClassLoaderService.buildClassLoaderKey 保持严格一致。
+     * <p>
+     * 供 {@code convertJarsToKey} 兜底与 {@code SeaTunnelAdapter.convertJarsToKey} 实现共用，消除重复。
+     */
+    public static String buildClassLoaderKey(Collection<URL> jars) {
+        if (jars == null || jars.isEmpty()) {
+            return "";
+        }
+        return jars.stream().map(URL::toString).sorted().collect(Collectors.joining());
     }
 
     /**

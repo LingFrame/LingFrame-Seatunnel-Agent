@@ -102,6 +102,13 @@ public final class AgentPipelineFactory {
         final EventBus eventBus = new EventBus();
         final RuntimeCoordinator runtimeCoordinator = new RuntimeCoordinator(eventBus);
         runtimeCoordinator.start();
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                runtimeCoordinator.stop();
+            } catch (Throwable ignored) {
+                // fail-open: shutdown hook 异常不得传播
+            }
+        }, "lingframe-runtime-coordinator-shutdown"));
         final LocalGovernanceRegistry governanceRegistry = resilienceEnabled
                 ? new LocalGovernanceRegistry(eventBus)
                 : null;
@@ -165,7 +172,7 @@ public final class AgentPipelineFactory {
         configCenter.tryInit();
 
         return new AgentGovernanceRuntime(pipelineEngine, unloadCoordinator, lingRepository, configCenter,
-                eventBus, metricsCollector, virtualLingManager);
+                eventBus, metricsCollector, virtualLingManager, runtimeCoordinator);
     }
 
     /**
