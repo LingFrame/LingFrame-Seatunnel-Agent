@@ -2,6 +2,7 @@ package com.lingframe.agent.bridge;
 
 import java.net.URL;
 import java.util.Collection;
+import java.util.stream.Collectors;
 
 /**
  * 全局可见的静态桥接入口。
@@ -63,7 +64,7 @@ public final class LingFrameAgentBridge {
         return c != null ? c.convertJarsToKey(jars)
                 // 兜底与官方 DefaultClassLoaderService.buildClassLoaderKey 保持严格一致
                 : (jars == null || jars.isEmpty()) ? ""
-                : jars.stream().map(URL::toString).sorted().reduce((a, b) -> a + b).orElse("");
+                : jars.stream().map(URL::toString).sorted().collect(Collectors.joining());
     }
 
     /**

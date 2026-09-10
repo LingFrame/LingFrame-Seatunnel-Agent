@@ -123,7 +123,7 @@ public final class LingFrameAgentActivationRunner {
         try {
             return AgentPipelineFactory.create(config);
         } catch (Exception e) {
-            log.warn("Failed to initialize governance pipeline, falling back to TRACE_ONLY mode: {}", e.getMessage());
+            log.warn("Failed to initialize governance pipeline, falling back to TRACE_ONLY mode", e);
             return null;
         }
     }
@@ -212,7 +212,7 @@ public final class LingFrameAgentActivationRunner {
         try {
             final Class<?> clazz = Class.forName(ABSTRACT_TASK_TYPE);
             for (Field f : clazz.getDeclaredFields()) {
-                if ("jobID".equals(f.getName())
+                if (("jobID".equals(f.getName()) || "jobId".equals(f.getName()))
                         && (f.getType() == long.class || f.getType() == Long.class)) {
                     return true;
                 }
@@ -303,7 +303,7 @@ public final class LingFrameAgentActivationRunner {
             log.info("EngineClassLoaderCleanup ENABLED — capturing TaskExecutionService, releasing finished "
                     + "job ClassLoader refs (interval=1s)");
         } catch (Throwable t) {
-            log.warn("EngineClassLoaderCleanup setup FAILED (Metaspace governance degraded): {}", t.getMessage());
+            log.warn("EngineClassLoaderCleanup setup FAILED (Metaspace governance degraded)", t);
         }
     }
 
@@ -435,7 +435,7 @@ public final class LingFrameAgentActivationRunner {
             ManagementFactory.getPlatformMBeanServer().registerMBean(mbean, name);
             log.info("LingFrame Agent observability MBean registered: {}", name);
         } catch (Throwable t) {
-            log.warn("Failed to register observability MBean (agent continues without JMX exposure): {}", t.getMessage());
+            log.warn("Failed to register observability MBean (agent continues without JMX exposure)", t);
         }
     }
 
@@ -467,8 +467,8 @@ public final class LingFrameAgentActivationRunner {
             return withGuard;
         } catch (Exception e) {
             adviceStatus.put("TcclGuard", "FAILED");
-            log.warn("TcclGuardAdvice registration FAILED, TCCL guard degraded to onPhysicalRelease-only mode: {}",
-                    e.getMessage());
+            log.warn("TcclGuardAdvice registration FAILED, TCCL guard degraded to onPhysicalRelease-only mode",
+                    e);
             return builder;
         }
     }

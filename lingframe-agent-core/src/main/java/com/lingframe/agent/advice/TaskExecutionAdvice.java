@@ -24,12 +24,20 @@ public final class TaskExecutionAdvice {
 
     @Advice.OnMethodEnter
     public static void onCallEnter(@Advice.This Object task) {
-        LingFrameAgentBridge.beforeTaskCall(task);
+        try {
+            LingFrameAgentBridge.beforeTaskCall(task);
+        } catch (Throwable ignored) {
+            // fail-open: advice 异常不得传播到宿主引擎
+        }
     }
 
     @Advice.OnMethodExit(onThrowable = Throwable.class)
     public static void onCallExit(@Advice.Thrown Throwable thrown, @Advice.This Object task) {
-        LingFrameAgentBridge.afterTaskCall(task, thrown);
+        try {
+            LingFrameAgentBridge.afterTaskCall(task, thrown);
+        } catch (Throwable ignored) {
+            // fail-open: advice 异常不得传播到宿主引擎
+        }
     }
 
     private TaskExecutionAdvice() {

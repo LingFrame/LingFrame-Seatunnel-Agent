@@ -64,7 +64,7 @@ public final class JobIdExtractor {
             accessor = resolve(task.getClass());
         } catch (Throwable t) {
             // 异常路径不应击穿调用方；统一走 SLF4J（热路径仅在异常时触发）
-            log.warn("JobIdExtractor resolve threw for {}: {}", task.getClass().getName(), t.toString());
+            log.warn("JobIdExtractor resolve threw for {}", task.getClass().getName(), t);
             return NO_JOB;
         }
         if (accessor == NO_GETTER) {
@@ -80,8 +80,8 @@ public final class JobIdExtractor {
             return (Long) ((Method) accessor).invoke(task);
         } catch (Throwable t) {
             // 暴露 JDK 模块系统 / 安全策略拦截的真实原因；统一走 SLF4J（异常路径，不刷热路径）
-            log.warn("JobIdExtractor read threw for {} accessor={}: {}",
-                    task.getClass().getName(), accessor.getClass().getSimpleName(), t.toString());
+            log.warn("JobIdExtractor read threw for {} accessor={}",
+                    task.getClass().getName(), accessor.getClass().getSimpleName(), t);
             return NO_JOB;
         }
     }

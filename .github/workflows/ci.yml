@@ -99,7 +99,7 @@ jobs:
             exit 1
           fi
           TEST_STATUS=0
-          mvn -B verify -Dlingframe.test.serial.rounds=5 || TEST_STATUS=$?
+          mvn -B verify || TEST_STATUS=$?
           echo "=== Metaspace Audit Log (target/logs/metaspace-audit.log) ==="
           cat target/logs/metaspace-audit.log 2>/dev/null || echo "No metaspace-audit.log found"
           echo "=== SeaTunnel Server Logs (always captured for cleaner/recycle audit) ==="

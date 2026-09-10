@@ -99,7 +99,7 @@ public final class LingFrameAgentPremain {
             log.info("Bridge JAR ({} bytes) appended to Bootstrap ClassLoader search: {}",
                     bridgeJar.length(), bridgeJar.getAbsolutePath());
         } catch (Exception e) {
-            log.warn("Failed to append Bridge JAR to Bootstrap ClassLoader: {}", e.getMessage());
+            log.warn("Failed to append Bridge JAR to Bootstrap ClassLoader", e);
         }
     }
 

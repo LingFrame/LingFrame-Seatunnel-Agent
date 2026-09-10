@@ -24,6 +24,7 @@ import java.net.URL;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Locale;
+import java.util.stream.Collectors;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAccumulator;
@@ -163,11 +164,11 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
     @Override
     public String convertJarsToKey(Collection<URL> jars) {
         // 与 SeaTunnel 官方 DefaultClassLoaderService.buildClassLoaderKey 保持严格一致
-        // 使用 sorted() + reduce((a, b) -> a + b) 拼接，确保在 releaseClassLoader 切面拦截时精确命中 key
+        // 使用 sorted() + Collectors.joining() 拼接，确保在 releaseClassLoader 切面拦截时精确命中 key
         if (jars == null || jars.isEmpty()) {
             return "";
         }
-        return jars.stream().map(URL::toString).sorted().reduce((a, b) -> a + b).orElse("");
+        return jars.stream().map(URL::toString).sorted().collect(Collectors.joining());
     }
 
     /** 兼容便捷入口：无 task 上下文时按共享灵元处理。 */
@@ -283,9 +284,16 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
      * </ul>
      */
     private void handleGovernanceRejection(LingInvocationException e) {
-        final String throttleKey = e.getKind() != null ? e.getKind().name() : "UNKNOWN";
+        final ErrorKind kind = e.getKind();
+        final String throttleKey = kind != null ? kind.name() : "UNKNOWN";
         final boolean allowLog = rejectionThrottle.tryAcquire(throttleKey, System.currentTimeMillis());
-        switch (e.getKind()) {
+        if (kind == null) {
+            if (allowLog) {
+                log.warn("Governance rejected [UNKNOWN]: {}", e.getMessage());
+            }
+            return;
+        }
+        switch (kind) {
             case RATE_LIMITED:
                 if (allowLog) {
                     log.warn("Governance rejected [{}], backing off to next token: {}", e.getKind(), e.getMessage());
@@ -403,7 +411,7 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
                         error.toString());
             }
         } catch (Exception e) {
-            log.debug("Failed to record task metrics: {}", e.getMessage());
+            log.debug("Failed to record task metrics", e);
         }
     }
 
@@ -419,7 +427,7 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
             pipelineEngine.reportOutcome(
                     lingId != null ? lingId : VIRTUAL_LING_ID, success, durationNanos, error);
         } catch (Exception e) {
-            log.debug("Failed to report outcome to circuit breaker: {}", e.getMessage());
+            log.debug("Failed to report outcome to circuit breaker", e);
         }
     }
 
@@ -526,7 +534,7 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
                                     event.getNewState(), event.getFailureRate()));
             log.info("Pipeline event subscriptions registered: TraceLog, AuditLog, CircuitBreakerState");
         } catch (Exception e) {
-            log.warn("Failed to subscribe pipeline events: {}", e.getMessage());
+            log.warn("Failed to subscribe pipeline events", e);
         }
     }
 

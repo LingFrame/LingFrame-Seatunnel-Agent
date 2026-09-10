@@ -66,10 +66,10 @@ Agent 借道 LingFrame 治理流水线（GOVERN_ONLY 模式），真实生效范
 >    （8.63 / 9.17 / 8.89 / 9.28 / 9.60 / 9.90 / 9.91 / 10.19 MB），jdbc/redis/mongodb 在 source 与 sink
 >    两种角色下均无泄漏。**CI A/B 对比审计最终证据（2026-09-10）**：全真容器化（MySQL 8.0 + Kafka 3.7.0 KRaft）
 >    构建 Fake / MySQL / Kafka × Console / MySQL / Kafka **3×3 = 9 组全正交矩阵**与 **4 线程异构并发交错压测**，
->    Native 对照组（无 Agent）与 Agent 实验组各跑 **45 job（共 90 job）**，逐一验证 FINISHED 终态。
->    **Agent 组 Metaspace 增长 13.58 MB**（< 15MB 阈值），`SeaTunnelChildFirstClassLoader` 拋留 **0**，类卸载率 **94%**；
->    **Native 对照组 Metaspace 增长 249.30 MB**，ClassLoader 拋留 **240**，类卸载率 **0.08%**。
->    **Net Overhead = -235.72 MB**（Agent 比 Native 少 235.72 MB——在本测试场景下 Agent 呈净收益）。HTTP 500 = 0，callback NPE = 0。
+>    Native 对照组（无 Agent）与 Agent 实验组各跑 **72 job（共 144 job）**，逐一验证 FINISHED 终态。
+>    **Agent 组 Metaspace 增长 14.06 MB**（< 15MB 阈值），`SeaTunnelChildFirstClassLoader` 拋留 **0**，类卸载率 **96.3%**；
+>    **Native 对照组 Metaspace 增长 391.16 MB**，ClassLoader 拋留 **384**，类卸载率 **0.14%**。
+>    **Net Overhead = -377.10 MB**（Agent 比 Native 少 377.10 MB——在本测试场景下 Agent 呈净收益）。HTTP 500 = 0，callback NPE = 0。5 轮长尾证据见 §6.3。
 >    **完整复现流程与数据见 [`docs/classloader-unload-verification.md`](docs/classloader-unload-verification.md)**。
 > 3. **弹性治理按作业隔离**：`per-job-governance-enabled` 默认 `true`，治理身份按作业生成（jobID 提取 + 版本指纹门控），限流/熔断/健康状态按作业隔离，故障作业不波及其他作业；显式 `false` 回退引擎级共享灵元。治理动作生效性（限流拦截/熔断打开）已在真实引擎端到端验证（`JobIsolationIT` / `DualJobFaultInjectionIT` / JMH governed 跑分）。
 

@@ -105,7 +105,7 @@ public final class HazelcastConfigCenter {
                     hazelcastInstance.getName(), CONFIG_IMAP_NAME, listenerIds.size());
             return true;
         } catch (Throwable t) {
-            log.warn("Failed to init Hazelcast config center: {}", t.getMessage());
+            log.warn("Failed to init Hazelcast config center", t);
             return false;
         }
     }
@@ -147,13 +147,17 @@ public final class HazelcastConfigCenter {
                     newConfig.getCircuitBreakerSlidingWindowSize(),
                     newConfig.getBulkheadMaxConcurrent());
         } catch (Exception e) {
-            log.warn("Failed to refresh ling [{}] config: {}", lingId, e.getMessage());
+            log.warn("Failed to refresh ling [{}] config", lingId, e);
         }
     }
 
     /** 刷新全部已注册作业灵元（`seatunnel-job-*`），把全局裸 key 变更广播到各作业。 */
     private void refreshAllJobLings() {
-        for (LingRuntime rt : lingRepository.getAllRuntimes()) {
+        final Collection<LingRuntime> runtimes = lingRepository.getAllRuntimes();
+        if (runtimes == null) {
+            return;
+        }
+        for (LingRuntime rt : runtimes) {
             final String id = rt.getLingId();
             if (id != null && id.startsWith(JOB_LING_PREFIX)) {
                 refreshLing(id, id.substring(JOB_LING_PREFIX.length()));

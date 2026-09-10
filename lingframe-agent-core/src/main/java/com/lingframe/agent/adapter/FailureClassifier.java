@@ -158,12 +158,12 @@ public final class FailureClassifier {
     /** 兜底启发式：类名 / 消息关键字猜测（默认配置下保留既有判定能力，供回滚与黄金样本一致）。 */
     private static boolean heuristicMatch(Throwable t) {
         final String name = t.getClass().getName();
-        if (name != null && (name.contains("ConnectException")
+        if (name.contains("ConnectException")
                 || name.contains("SocketException")
                 || name.contains("TimeoutException")
                 || name.contains("Unreachable")
                 || name.contains("ConnectionClosed")
-                || name.contains("BrokenPipe"))) {
+                || name.contains("BrokenPipe")) {
             return true;
         }
         final String msg = t.getMessage();

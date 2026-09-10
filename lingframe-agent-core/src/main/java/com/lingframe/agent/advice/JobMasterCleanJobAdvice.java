@@ -16,8 +16,12 @@ public final class JobMasterCleanJobAdvice {
 
     @Advice.OnMethodExit(onThrowable = Throwable.class)
     public static void onExit(@Advice.This Object jobMaster) {
-        if (jobMaster != null) {
-            EngineClassLoaderCleaner.cleanJobMaster(jobMaster);
+        try {
+            if (jobMaster != null) {
+                EngineClassLoaderCleaner.cleanJobMaster(jobMaster);
+            }
+        } catch (Throwable ignored) {
+            // fail-open: advice 异常不得传播到宿主引擎
         }
     }
 

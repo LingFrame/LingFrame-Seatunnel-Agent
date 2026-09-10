@@ -83,7 +83,7 @@ public final class AgentPipelineFactory {
      */
     public static AgentGovernanceRuntime create(AgentConfig agentConfig) {
         final boolean devMode = agentConfig != null && agentConfig.isDevMode();
-        final boolean permissionEnabled = agentConfig == null || agentConfig.isPermissionEnabled();
+        final boolean permissionEnabled = agentConfig != null && agentConfig.isPermissionEnabled();
         final boolean resilienceEnabled = agentConfig == null
                 || agentConfig.isCircuitBreakerEnabled()
                 || agentConfig.isRateLimiterEnabled();
@@ -233,8 +233,8 @@ public final class AgentPipelineFactory {
                     runtimeConfig.getCircuitBreakerSlidingWindowSize());
             return virtualLingManager;
         } catch (Exception e) {
-            log.warn("Failed to register virtual ling [{}], resilience filters will degrade to passthrough: {}",
-                    VIRTUAL_LING_ID, e.getMessage());
+            log.warn("Failed to register virtual ling [{}], resilience filters will degrade to passthrough",
+                    VIRTUAL_LING_ID, e);
             return null;
         }
     }

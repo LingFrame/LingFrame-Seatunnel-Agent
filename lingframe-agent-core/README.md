@@ -27,14 +27,14 @@ mvn -o -pl :lingframe-agent-core -am install
 
 ## 测试
 
-`mvn -o -pl :lingframe-agent-core test` — **105 个 @Test**（作业级治理：作业 ID 提取/注册表/退避控制器；熔断失败判定分类器 `FailureClassifier`；可观测性等），全绿。Checkstyle 0 违规，JaCoCo 覆盖率门槛 60%。
+`mvn -o -pl :lingframe-agent-core test` — **118 个 @Test**（作业级治理：作业 ID 提取/注册表/退避控制器；熔断失败判定分类器 `FailureClassifier`；可观测性等），全绿。Checkstyle 0 违规，JaCoCo 覆盖率门槛 60%。
 
 ## 配置（lingframe-governance.yaml）
 
 ```yaml
 governance:
   enabled: true
-  task-execution-advice-enabled: true      # 批次治理切点开关（默认关）
+  task-execution-advice-enabled: false     # 批次治理切点开关（默认关）
   dev-mode: false
   observability:                           # 可观测性（系统属性 -Dlingframe.agent.* 覆盖优先）
     trace-level: INFO                       #   trace 事件日志级别 OFF/WARN/INFO

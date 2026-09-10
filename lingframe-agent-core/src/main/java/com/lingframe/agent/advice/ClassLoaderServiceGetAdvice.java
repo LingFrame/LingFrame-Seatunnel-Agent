@@ -21,8 +21,12 @@ public final class ClassLoaderServiceGetAdvice {
             @Advice.Argument(1) Collection<URL> jars,
             @Advice.Return ClassLoader classLoader
     ) {
-        if (jobId > 0 && classLoader != null) {
-            EngineClassLoaderCleaner.trackJobClassLoader(jobId, classLoader);
+        try {
+            if (jobId > 0 && classLoader != null) {
+                EngineClassLoaderCleaner.trackJobClassLoader(jobId, classLoader);
+            }
+        } catch (Throwable ignored) {
+            // fail-open: advice 异常不得传播到宿主引擎
         }
     }
 

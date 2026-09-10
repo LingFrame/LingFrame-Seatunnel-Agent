@@ -16,7 +16,11 @@ public final class TaskExecutionServiceCacheAdvice {
 
     @Advice.OnMethodExit
     public static void onExit(@Advice.This Object self) {
-        EngineClassLoaderCleaner.register(self);
+        try {
+            EngineClassLoaderCleaner.register(self);
+        } catch (Throwable ignored) {
+            // fail-open: advice 异常不得传播到宿主引擎
+        }
     }
 
     private TaskExecutionServiceCacheAdvice() {

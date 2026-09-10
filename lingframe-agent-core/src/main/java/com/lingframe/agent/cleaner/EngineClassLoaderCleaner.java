@@ -250,8 +250,8 @@ public final class EngineClassLoaderCleaner {
             // 全局扫描确保彻底清除残留的 SoftReference → ObjectStreamClass → Class → ClassLoader 引用链。
             cleanAllObjectStreamClassCaches();
         } catch (Throwable t) {
-            log.warn("EngineClassLoaderCleaner finished-context clean skipped (engine version mismatch?): {}",
-                    t.getMessage());
+            log.warn("EngineClassLoaderCleaner finished-context clean skipped (engine version mismatch?)",
+                    t);
         }
     }
 
@@ -368,7 +368,7 @@ public final class EngineClassLoaderCleaner {
             log.info("EngineClassLoaderCleaner severed Coordinator GC roots for JobMaster {} ({} fields cleared)",
                     jobId, fieldsCleared);
         } catch (Throwable t) {
-            log.warn("EngineClassLoaderCleaner failed to clean JobMaster: {}", t.getMessage());
+            log.warn("EngineClassLoaderCleaner failed to clean JobMaster", t);
         }
     }
 
@@ -429,7 +429,7 @@ public final class EngineClassLoaderCleaner {
                     }
                 }
             } catch (Throwable t) {
-                log.warn("EngineClassLoaderCleaner cache extraction for job {} failed: {}", jobId, t.getMessage());
+                log.warn("EngineClassLoaderCleaner cache extraction for job {} failed", jobId, t);
             }
         }
 
@@ -447,7 +447,7 @@ public final class EngineClassLoaderCleaner {
             }
             if (evicted > 0) {
                 log.info("EngineClassLoaderCleaner evicted {} leaked ClassLoaders for job {}", evicted, jobId);
-                System.gc();
+
             }
         }
     }
@@ -866,7 +866,7 @@ public final class EngineClassLoaderCleaner {
                 return removed;
             }
         } catch (Throwable t) {
-            log.debug("Failed to clean {} for job {}: {}", fieldName, jobId, t.getMessage());
+            log.debug("Failed to clean {} for job {}", fieldName, jobId, t);
         }
         return 0;
     }
@@ -936,7 +936,7 @@ public final class EngineClassLoaderCleaner {
                 }
             }
         } catch (Throwable t) {
-            log.debug("Coordinator clean finished JobMasters skipped: {}", t.getMessage());
+            log.debug("Coordinator clean finished JobMasters skipped", t);
         }
     }
 
@@ -996,7 +996,7 @@ public final class EngineClassLoaderCleaner {
                         staleRemoved, activeJobIds.size());
             }
         } catch (Throwable t) {
-            log.debug("Failed to clean stale executionContexts: {}", t.getMessage());
+            log.debug("Failed to clean stale executionContexts", t);
         }
     }
 

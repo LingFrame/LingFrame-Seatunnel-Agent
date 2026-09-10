@@ -150,7 +150,7 @@ java -classpath "D:/apache-maven-3.9.10/boot/plexus-classworlds-2.9.0.jar" \
 - **包名不得落在 `com.lingframe.agent.*`**：premain 的 ByteBuddy ignore matcher 会排除
   `com.lingframe.agent.` 前缀，落在其下的测试载体永远不会被织入，会虚假测出「零损耗」。
   本模块基准类统一放 `com.lingframe.benchmark`。
-- **SeaTunnel 版本口径**：Agent 基线为 SeaTunnel **2.3.8**；本模块织入的是本地
+- **SeaTunnel 版本口径**：Agent 基线为 SeaTunnel **2.3.13**；本模块织入的是本地
   `E:\Codes\seatunnel`（**3.0.0-SNAPSHOT**）构建产物。Agent 切点按全限定类名/方法名匹配，
   `AbstractTask` 的 FQN 在 2.x→3.x 未变故可织入，但字段若漂移 ByteBuddy 会静默跳过——
   跑分前后务必核对上面的「织入确认」。

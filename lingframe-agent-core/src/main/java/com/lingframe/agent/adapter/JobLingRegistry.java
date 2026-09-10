@@ -146,8 +146,8 @@ public final class JobLingRegistry {
             virtualLingManager.register(jobLingId(jobId), jobLingTemplate);
             log.debug("Registered job ling [{}]", jobLingId(jobId));
         } catch (Exception e) {
-            log.warn("Failed to register job ling [{}], job falls back to shared ling: {}",
-                    jobLingId(jobId), e.getMessage());
+            log.warn("Failed to register job ling [{}], job falls back to shared ling",
+                    jobLingId(jobId), e);
         }
     }
 
@@ -183,17 +183,17 @@ public final class JobLingRegistry {
         try {
             virtualLingManager.unregister(lingId);
         } catch (Exception e) {
-            log.warn("Error unregistering job ling [{}]: {}", lingId, e.getMessage());
+            log.warn("Error unregistering job ling [{}]", lingId, e);
         }
         try {
             pipelineEngine.evictLingResources(lingId);
         } catch (Exception e) {
-            log.warn("Error evicting job ling [{}] resilience resources: {}", lingId, e.getMessage());
+            log.warn("Error evicting job ling [{}] resilience resources", lingId, e);
         }
         try {
             metricsCollector.remove(lingId);
         } catch (Exception e) {
-            log.warn("Error removing job ling [{}] metrics: {}", lingId, e.getMessage());
+            log.warn("Error removing job ling [{}] metrics", lingId, e);
         }
         log.info("Reaped idle job ling [{}]", lingId);
     }

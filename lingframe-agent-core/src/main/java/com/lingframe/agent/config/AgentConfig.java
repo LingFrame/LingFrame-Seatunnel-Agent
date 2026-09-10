@@ -179,8 +179,8 @@ public final class AgentConfig {
             final Map<String, Object> root = yaml.load(is);
             return fromMap(root != null ? root : Collections.emptyMap());
         } catch (IOException | RuntimeException e) {
-            log.warn("Failed to load governance config from {}, using defaults. Error: {}",
-                    configPath, e.getMessage());
+            log.warn("Failed to load governance config from {}, using defaults",
+                    configPath, e);
             return defaults();
         }
     }
