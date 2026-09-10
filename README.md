@@ -1,4 +1,4 @@
-# LingFrame SeaTunnel Agent
+﻿# LingFrame SeaTunnel Agent
 
 > Java Agent 外挂，为 Apache SeaTunnel 提供 LingFrame 类隔离和治理能力。
 
@@ -45,7 +45,7 @@ Agent 借道 LingFrame 治理流水线（GOVERN_ONLY 模式），真实生效范
 | 审计追踪 | **已生效** | 治理链路 Trace 采集，可通过 EventBus 订阅审计事件 |
 | ClassLoader 深度清理 | **已生效** | ClassLoaderReleaseAdvice 织入 releaseClassLoader 拦截点，触发 JDBC 驱动注销 + URLClassLoader 关闭 + ThreadLocal 深度安全清理。**生效范围：`classloader-cache-mode: false`（每 job 独立 ClassLoader）场景**；`cache-mode: true`（共享缓存，SeaTunnel 默认）时 ClassLoader 为多 job 共享常驻（SeaTunnel 设计），Agent 不做物理关闭，仅提供 TCCL 残留防御 |
 | 权限审计 | **默认关闭** | 需 `governance.security.permission-enabled: true` 且 `dev-mode: false` 才进入零信任（Deny-by-Default）。注意 Agent 自身不声明 `requiredPermission`，单独开启会导致每个批次刷一条拒绝告警，请配合为虚拟灵元补齐权限声明 |
-| 熔断 / 限流 | **默认关闭**（纯 ClassLoader 清理，零治理）；显式开启即真实生效 | 熔断/限流与批次切点**均默认 `false`**。需要治理的部署在 `lingframe-governance.yaml` 显式开 `circuit-breaker-enabled`/`rate-limiter-enabled`（或 `task-execution-advice-enabled`）即可：任一治理特性开启时批次切点**自动联动织入**（防「开了弹性却忘开切点」的伪开启），`beforeTaskCall` 构造 `InvocationContext` 调 `pipelineEngine.invoke(ctx)` 走完整 12 Filter 链前置治理（含 `ResilienceGovernanceFilter` 限流/熔断前置检查）；`afterTaskCall` 回灌真实业务结果到 `LingHealthMetrics`，触发 `RuntimeStatus.DEGRADED → MacroStateGuardFilter` 熔断路径。**熔断默认 fail-open 软退避（`CIRCUIT_OPEN/RATE_LIMITED/BULKHEAD_FULL` 命中仅 sleep 100ms 后放行，不真正甩负载）；设置 `governance.resilience.fail-closed: true` 后 `CIRCUIT_OPEN/BULKHEAD_FULL` 改为抛出 `GovernanceRejectException` 使 `call()` 失败触发引擎 Failover，即「熔断名副其实」**。**失败率口径：仅下游可用性异常（超时/IO/连接类）计入熔断失败率，普通业务异常（Transform/数据错误）不虚高指标**。**粒度：作业级隔离（`per-job-governance-enabled` 默认 `true`）**——治理身份按作业生成（jobID 提取 + 运行期版本指纹门控），限流/熔断/健康状态按作业隔离，故障作业不波及其他作业；显式 `per-job-governance-enabled: false` 可回退引擎级共享灵元 |
+| 熔断 / 限流 | **默认关闭**（纯 ClassLoader 清理，零治理）；显式开启即真实生效 | 熔断/限流与批次切点**均默认 `false`**。显式开 `circuit-breaker-enabled`/`rate-limiter-enabled`（或 `task-execution-advice-enabled`）即可：任一治理特性开启时批次切点**自动联动织入**（防伪开启），`beforeTaskCall` 走 12 Filter 链前置治理，`afterTaskCall` 回灌业务结果到 `LingHealthMetrics` 触发熔断路径。**退避策略**：`RATE_LIMITED` 按令牌间隔退避（`1000/rateLimit` ms + 抖动）；`CIRCUIT_OPEN`/`BULKHEAD_FULL` 默认 fail-open 软放行（不 sleep、不甩负载）；`fail-closed: true` 后改为抛 `GovernanceRejectException` 触发引擎 Failover。**失败率口径**：仅下游可用性异常计入熔断失败率，普通业务异常不虚高指标。**粒度**：作业级隔离（默认 `true`），故障作业不波及其他作业；显式 `false` 可回退引擎级共享灵元 |
 | 路由 / 状态守卫 | **已生效（虚拟灵元 ACTIVE）** | 注入生产级 VirtualLingManager 生成的虚拟灵元（状态处于 ACTIVE），MacroStateGuardFilter 与指标双向闭环联动 |
 | 灰度路由 | **已装配，可扩展** | LabelMatchRouter 已注册，支持结合扩展灵元定义细粒度流量路由策略 |
 | 分布式动态配置 | **需治理切点生效** | HazelcastConfigCenter 通过 IMap `lingframe-governance-config` 监听 5 类 Entry 事件（新增/更新/删除/驱逐/过期），毫秒级热刷新虚拟灵元 LingRuntimeConfig（限流 / 熔断阈值 / 滑动窗口 / 超时 / **`bulkhead-max-concurrent`**），支持配置删除安全回退。热刷新的参数由 Pipeline 内的弹性治理 Filter 消费，因此需治理切点生效（任一治理特性开启即自动织入）才有可观测效果 |

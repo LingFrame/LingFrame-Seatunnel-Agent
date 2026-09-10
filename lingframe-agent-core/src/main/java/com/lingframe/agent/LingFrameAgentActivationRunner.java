@@ -37,7 +37,7 @@ import javax.management.ObjectName;
 /**
  * 治理激活运行器（独立于 {@link LingFrameAgentPremain} 的委托目标）。
  * <p>
- * 双副本根因（JMH governed fork 实测复现）决定了它必须独立成类、且只允许被
+ * 双副本根因决定了它必须独立成类、且只允许被
  * {@code premain()} 以反射方式加载：
  * <ol>
  *   <li>{@code -javaagent} 规范会把 Agent Fat-Jar 自动追加进 system classpath，

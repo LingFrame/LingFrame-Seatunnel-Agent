@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 适用 | lingframe-seatunnel-agent 及 lingframe-core 0.4.0 及以上 |
+| 适用 | lingframe-seatunnel-agent 及 lingframe-core 0.4.5 及以上 |
 | 读者 | 平台运维 / SRE / 集群负责人 |
 
 ---
@@ -155,7 +155,7 @@ premain 运行时指纹探测 `AbstractTask.jobID` 字段：
 
 - **维度上限**：`per-job-max-tracked-jobs`（默认 1024）硬上限，超限新作业回退共享 + 采样 WARN；每作业 = 1 治理维度 + 1 熔断器 + 1 限流器 + 1 份指标（`seatunnel-job-{jobId}` 命名），上限内资源可控；
 - **回收**：Reaper 按 `reap-interval-ms` 周期扫描空闲超 TTL 作业，回收顺序 `VirtualLingManager.unregister` → 治理器 evict → 指标 remove（本地可验证零残留，见 §9）；
-- **性能红线**：governed 模式（含 per-job 路径）批次附加损耗按 job 级总耗时膨胀衡量——正式跑分 100ms 批附加 +173.2µs（per-job 轮转 +183.4µs，作业级查表仅 +10µs），典型场景 job 级总耗时影响 <0.5%，属正常范围。热路径为 `JobIdExtractor` 按类型缓存 `Field` 的 `getLong` 直读 + 作业维度引用解析，无重复反射（JDK8 / JDK17 行为一致）；
+- **性能红线**：governed 模式（含 per-job 路径）批次附加损耗按 job 级总耗时膨胀衡量——正式跑分 100ms 批附加 +173.2µs（per-job 轮转 +183.4µs，作业级查表仅 +10µs；不同 JMH 轮次结果有 ±15µs 波动，见 benchmark/README），典型场景 job 级总耗时影响 <0.5%，属正常范围。热路径为 `JobIdExtractor` 按类型缓存 `Field` 的 `getLong` 直读 + 作业维度引用解析，无重复反射（JDK8 / JDK17 行为一致）；
 - **配置热刷开销**：仅 EntryListener 回调 + 配置引用替换 + 治理器指纹比对（int/long 比较），不随作业数放大；冷启动期 5s 节流重试无批量探测风暴。
 
 ---

@@ -375,10 +375,8 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
                 reportOutcome(effectiveLingId, true, durationNanos, null);
                 return;
             }
-            // 修复：仅下游可用性异常计入熔断失败率。普通业务异常（Transform / 数据校验 NPE /
-            // IllegalArgumentException 等）不代表下游不可用，不计入——否则会虚高虚拟灵元失败率，
-            // 触发 RuntimeStatus.DEGRADED 后每批次 +100ms 软退避自我放大延迟。业务失败由 SeaTunnel
-            // 自身的 Failover / 重试处理，agent 熔断只关心「下游是否可用」。
+            // 仅下游可用性异常计入熔断失败率。普通业务异常不代表下游不可用，
+            // 业务失败由 SeaTunnel 自身 Failover / 重试处理。
             if (isDownstreamAvailabilityFailure(error)) {
                 final boolean isTimeout = isTimeoutError(error);
                 if (metricsCollector != null) {
@@ -465,10 +463,8 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
      * 时序约束：Agent premain 在 SeaTunnel 启动之前执行，此时 Hazelcast 实例尚未创建，
      * {@code AgentPipelineFactory} 中的首次 tryInit 必然失败。beforeTaskCall 是 SeaTunnel
      * 运行期与 Agent 交互的入口，但集群模式下 Hazelcast 成员发现需要时间，
-     * 首个批次到达时实例仍可能未就绪——因此初始化**失败后必须保留重试能力**：
-     * 原实现用 {@code configCenterInitAttempted} 一次性标记，首次失败即永久放弃，
-     * 会导致分布式动态配置在集群启动期静默失效。
-     * <p>
+      * 首个批次到达时实例仍可能未就绪——因此初始化**失败后必须保留重试能力**。
+      * <p>
      * 节流而非每次批次都探测：重试按 {@link #CONFIG_CENTER_RETRY_INTERVAL_MS} 间隔进行，
      * 避免 Hazelcast 就绪前高频调用 {@code Hazelcast.getAllHazelcastInstances()}。
      * 初始化成功后 {@code configCenter.isInitialized()} 恒为 true，本方法退化为一次布尔判断。

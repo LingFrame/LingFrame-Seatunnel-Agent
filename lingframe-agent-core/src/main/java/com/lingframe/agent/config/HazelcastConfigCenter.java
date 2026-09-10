@@ -174,8 +174,7 @@ public final class HazelcastConfigCenter {
     private LingRuntimeConfig buildConfigFromMap(LingRuntimeConfig fallback, String globalJobId) {
         final LingRuntimeConfig.LingRuntimeConfigBuilder builder = LingRuntimeConfig.builder()
                 .maxHistorySnapshots(fallback.getMaxHistorySnapshots())
-                // 修复：bulkhead-max-concurrent 此前硬编码随 fallback（不热刷），
-                // 运维无法动态调整舱壁并发。现纳入 IMap 热刷 key 集合（缺省仍回退现有值）。
+                // bulkhead-max-concurrent 纳入 IMap 热刷 key 集合（缺省回退现有值）。
                 .bulkheadMaxConcurrent(parseInt(
                         cfgKey(configMap, globalJobId, KEY_BULKHEAD_MAX_CONCURRENT), fallback.getBulkheadMaxConcurrent()));
 

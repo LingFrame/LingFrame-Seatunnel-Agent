@@ -375,9 +375,8 @@ public final class EngineClassLoaderCleaner {
             fieldsCleared += nullifyField(jobMaster, "jobImmutableInformation");
             // 注意：不 nullify jobMasterCompleteFuture——它是 CompletableFuture<JobResult>（AppClassLoader 加载），
             // 不持有 connector ClassLoader GC Root，nullify 无益于 ClassLoader 回收。
-            // 引擎 initStateFuture callback 在 cleanJob() 返回后执行 jobMasterCompleteFuture.complete(jobResult)（行 381），
-            // advice（@OnMethodExit on cleanJob()）在 cleanJob() 返回后触发 nullify，
-            // 若 nullify 该字段会导致 callback NPE（CI run 34382465832 实测 45 次 NPE）。
+            // 引擎 initStateFuture callback 在 cleanJob() 返回后执行 jobMasterCompleteFuture.complete(jobResult)，
+            // nullify 该字段会导致 callback NPE。
 
 
             log.info("EngineClassLoaderCleaner severed Coordinator GC roots for JobMaster {} ({} fields cleared)",
@@ -1049,9 +1048,9 @@ public final class EngineClassLoaderCleaner {
      * <p>
      * 引擎 {@code JobMaster.cleanJob()} 的执行顺序为：
      * {@code storeFinishedJobState} → {@code removeJobIMap()}（含 {@code runningJobInfoIMap.remove}）。
-     * 在 {@code removeJobIMap()} 执行前释放 ClassLoader 会导致 REST API 反序列化
-     * {@code JobInfo} 时 {@code ClassNotFoundException}（HTTP 500）；
-     * 在此前 nullify {@code physicalPlan}/{@code logicalDag} 会导致 {@code cleanJob()} NPE。
+      * 在 {@code removeJobIMap()} 执行前释放 ClassLoader 会导致 REST API 反序列化
+      * {@code JobInfo} 时 {@code ClassNotFoundException}（HTTP 500）；
+      * nullify {@code physicalPlan}/{@code logicalDag} 会导致 {@code cleanJob()} NPE。
      * <p>
      * 因此本方法返回 {@code true} 时，调用方必须延迟 ClassLoader 释放与字段置空。
      *
