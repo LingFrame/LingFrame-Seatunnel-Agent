@@ -21,7 +21,8 @@ class BackoffControllerTest {
         controller.backoffRatelimited(1000);
         final long durationMs = (System.nanoTime() - t0) / 1_000_000;
         // 令牌间隔 1ms（校正核心：rateLimit=1000 时固定 100ms 等同过度降速 100 倍）
-        assertThat(durationMs).isLessThan(50L);
+        // 阈值 100ms：Thread.sleep(1) 受 OS 调度器精度影响（Windows ~15.6ms），实际耗时可能达数十 ms
+        assertThat(durationMs).isLessThan(100L);
     }
 
     @Test
