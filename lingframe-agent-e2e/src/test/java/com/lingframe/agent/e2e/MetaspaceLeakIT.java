@@ -15,12 +15,16 @@ import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.stream.Stream;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -54,7 +58,19 @@ class MetaspaceLeakIT {
     private static final String NATIVE_REST_URL = "http://localhost:5802/hazelcast/rest/maps/submit-job";
     private static final String NATIVE_CONTAINER_NAME = "seatunnel-native";
 
-    private static final long METASPACE_GROWTH_THRESHOLD_BYTES = 15 * 1024 * 1024L;
+    // 动态 Metaspace 增长阈值：base + perJob × totalJobExecutions，再乘安全余量
+    // base ≈ 7 MB（Agent 固定残留），perJob ≈ 0.25 MB/作业次（CL 卸载后 chunk 惰性回收残留）
+    private static final long METASPACE_GROWTH_BASE_BYTES = 7 * 1024 * 1024L;
+    private static final double METASPACE_GROWTH_PER_JOB_MB = 0.25;
+    private static final double METASPACE_GROWTH_SAFETY_MARGIN = 1.5;
+    private static final double METASPACE_CONVERGENCE_THRESHOLD = 0.2;
+
+    private static long computeDynamicGrowthThreshold(int totalJobExecutions) {
+        return (long) ((METASPACE_GROWTH_BASE_BYTES
+                + METASPACE_GROWTH_PER_JOB_MB * totalJobExecutions * 1024 * 1024L)
+                * METASPACE_GROWTH_SAFETY_MARGIN);
+    }
+
     private static final long MAX_NET_OVERHEAD_BYTES = 2 * 1024 * 1024L;
 
     private static final Pattern METASPACE_USED_PATTERN =
@@ -71,11 +87,12 @@ class MetaspaceLeakIT {
         private final long classLoaderCount;
         private final ClassLoaderStatsResult baselineClStats;
         private final ClassLoaderStatsResult preGcClStats;
+        private final int totalJobExecutions;
 
         MetaspaceAuditResult(long baseline, List<Long> roundUsed, long finalUsed,
                              long loadedDelta, long unloadedDelta, long retainedClasses,
                              long classLoaderCount, ClassLoaderStatsResult baselineClStats,
-                             ClassLoaderStatsResult preGcClStats) {
+                             ClassLoaderStatsResult preGcClStats, int totalJobExecutions) {
             this.baseline = baseline;
             this.roundUsed = roundUsed;
             this.finalUsed = finalUsed;
@@ -86,6 +103,7 @@ class MetaspaceLeakIT {
             this.classLoaderCount = classLoaderCount;
             this.baselineClStats = baselineClStats;
             this.preGcClStats = preGcClStats;
+            this.totalJobExecutions = totalJobExecutions;
         }
 
         public long getBaseline() {
@@ -126,6 +144,10 @@ class MetaspaceLeakIT {
 
         public ClassLoaderStatsResult getPreGcClStats() {
             return preGcClStats;
+        }
+
+        public int getTotalJobExecutions() {
+            return totalJobExecutions;
         }
     }
 
@@ -210,7 +232,9 @@ class MetaspaceLeakIT {
                 formatDelta(agentResult.getClassLoaderCount() - nativeResult.getClassLoaderCount())));
         log.info("========================================================================");
         log.info("  Net Overhead (Agent - Native) : {}", formatMb(netOverhead));
-        log.info("  Growth Threshold (Agent)      : {}", formatMb(METASPACE_GROWTH_THRESHOLD_BYTES));
+        final long dynamicGrowthThreshold = computeDynamicGrowthThreshold(agentResult.getTotalJobExecutions());
+        log.info("  Growth Threshold (Agent, dynamic) : {} (for {} job executions)",
+                formatMb(dynamicGrowthThreshold), agentResult.getTotalJobExecutions());
         log.info("  Overhead Threshold (Net)      : {}", formatMb(MAX_NET_OVERHEAD_BYTES));
         log.info("========================================================================");
 
@@ -232,12 +256,33 @@ class MetaspaceLeakIT {
                     formatMb(netOverhead), formatMb(MAX_NET_OVERHEAD_BYTES));
         }
 
-        // 2. 辅助提醒：Metaspace growth 超阈值时 WARN
-        if (agentResult.getNetGrowth() >= METASPACE_GROWTH_THRESHOLD_BYTES) {
-            log.warn("Agent Metaspace growth {} exceeds threshold {}."
+        // 2. 辅助提醒：Metaspace growth 超动态阈值时 WARN
+        if (agentResult.getNetGrowth() >= dynamicGrowthThreshold) {
+            log.warn("Agent Metaspace growth {} exceeds dynamic threshold {}."
                     + " Further investigation recommended.",
                     formatMb(agentResult.getNetGrowth()),
-                    formatMb(METASPACE_GROWTH_THRESHOLD_BYTES));
+                    formatMb(dynamicGrowthThreshold));
+        }
+
+        // 2b. 趋势提醒：Round 2 增量应远小于 Round 1 增量（收敛率 > 80%），不收敛时显眼告警
+        if (agentResult.getRoundUsed().size() >= 2) {
+            final long round1Delta = agentResult.getRoundUsed().get(0) - agentResult.getBaseline();
+            final long round2Delta = agentResult.getRoundUsed().get(1) - agentResult.getRoundUsed().get(0);
+            if (round1Delta > 1024 * 1024L) {
+                final double ratio = (double) round2Delta / round1Delta;
+                log.info("  Convergence (1 - Round2/Round1)     : {}%",
+                        String.format(Locale.ROOT, "%.1f", (1.0 - ratio) * 100));
+                if (ratio >= METASPACE_CONVERGENCE_THRESHOLD) {
+                    log.warn("========================================================================");
+                    log.warn("  !!! TREND WARNING !!! Agent Metaspace NOT converging!");
+                    log.warn("  Round 2 delta ({}) / Round 1 delta ({}) = {}% >= {}%",
+                            formatMb(round2Delta), formatMb(round1Delta),
+                            String.format(Locale.ROOT, "%.1f", ratio * 100),
+                            String.format(Locale.ROOT, "%.0f", METASPACE_CONVERGENCE_THRESHOLD * 100));
+                    log.warn("  Potential Metaspace leak -- investigate CL retention.");
+                    log.warn("========================================================================");
+                }
+            }
         }
 
         // 3. 类元数据未卸载 / CL 拘留诊断（先行：不管后续断言成功失败，dump 必须先抓）
@@ -416,138 +461,50 @@ class MetaspaceLeakIT {
         }
         return new MetaspaceAuditResult(baseline, roundUsed, finalUsed,
                 loadedDelta, unloadedDelta, retainedClasses, classLoaderCount, baselineClStats,
-                preGcClStats);
+                preGcClStats, allJobIds.size());
     }
 
 
-    private static final String MYSQL_URL =
-            "jdbc:mysql://mysql-server:3306/test?useSSL=false&allowPublicKeyRetrieval=true";
-    private static final String MYSQL_DRIVER = "com.mysql.cj.jdbc.Driver";
-    private static final String KAFKA_BOOTSTRAP = "kafka-server:9092";
-    private static final String SCHEMA_FIELDS =
-            "\"schema\":{\"fields\":{\"id\":\"int\",\"name\":\"string\",\"score\":\"double\"}}";
-    private static final String INSERT_QUERY =
-            "INSERT INTO t_sink (id, name, score) VALUES (?, ?, ?)"
-                    + " ON DUPLICATE KEY UPDATE name=VALUES(name), score=VALUES(score)";
-    private static final String SELECT_QUERY = "SELECT id, name, score FROM t_source";
-
-    private static final String FILE_INPUT_PATH = "/opt/seatunnel/e2e-input";
-    private static final String FILE_SINK_BASE_PATH = "/tmp/seatunnel-e2e-out";
-    private static final String SQL_TRANSFORM_QUERY = "select id, name, score from dual where id > 0";
-
     /**
-     * 构建 3×3 = 9 组全正交作业配置，外加扩展链路 4 组，共 13 组：
-     * 文件链路 2 组（Fake→LocalFile、LocalFile→Sql→LocalFile）
-     * 与跨组件 transform 混合链路 2 组（LocalFile→Sql→Jdbc、Jdbc→Sql→Kafka）。
-     * 组件维度：Fake、MySQL JDBC、Kafka KRaft、LocalFile、SQL transform。
+     * 从外置目录加载作业矩阵配置（标准 SeaTunnel JSON 格式）。
+     * 优先读 -Dlingframe.test.job.dir 指定的外部目录，未指定时读 classpath 默认 e2e-jobs/。
+     * 用户可通过增删 .json 文件调整作业矩阵，无需改代码。
      */
-    private List<String> buildOrthogonalMatrixJobConfigs() {
+    private List<String> buildOrthogonalMatrixJobConfigs() throws IOException {
         final List<String> jobs = new ArrayList<>();
-
-        // ① Fake -> Console（纯内存基线）
-        jobs.add("{\"env\":{\"job.name\":\"fake2console\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"FakeSource\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
-                + "\"sink\":[{\"plugin_name\":\"Console\"}]}");
-
-        // ② Fake -> MySQL（单端 JDBC 写入）
-        jobs.add("{\"env\":{\"job.name\":\"fake2mysql\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"FakeSource\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
-                + "\"sink\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + INSERT_QUERY + "\"}]}");
-
-        // ③ Fake -> Kafka（单端 MQ 生产）
-        jobs.add("{\"env\":{\"job.name\":\"fake2kafka\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"FakeSource\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
-                + "\"sink\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
-                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\",\"format\":\"json\"}]}");
-
-        // ④ MySQL -> Console（单端 JDBC 读取）
-        jobs.add("{\"env\":{\"job.name\":\"mysql2console\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + SELECT_QUERY + "\"," + SCHEMA_FIELDS + "}],"
-                + "\"sink\":[{\"plugin_name\":\"Console\"}]}");
-
-        // ⑤ MySQL -> MySQL（双端真实 JDBC 同构）
-        jobs.add("{\"env\":{\"job.name\":\"mysql2mysql\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + SELECT_QUERY + "\"," + SCHEMA_FIELDS + "}],"
-                + "\"sink\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + INSERT_QUERY + "\"}]}");
-
-        // ⑥ MySQL -> Kafka（跨协议异构：DB -> MQ）
-        jobs.add("{\"env\":{\"job.name\":\"mysql2kafka\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + SELECT_QUERY + "\"," + SCHEMA_FIELDS + "}],"
-                + "\"sink\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
-                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\",\"format\":\"json\"}]}");
-
-        // ⑦ Kafka -> Console（单端 MQ 消费）
-        jobs.add("{\"env\":{\"job.name\":\"kafka2console\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
-                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\","
-                + "\"consumer.group\":\"e2e-group-console\",\"commit_on_checkpoint\":false,\"start_mode\":\"earliest\","
-                + SCHEMA_FIELDS + ",\"format\":\"json\"}],"
-                + "\"sink\":[{\"plugin_name\":\"Console\"}]}");
-
-        // ⑧ Kafka -> MySQL（跨协议异构：MQ -> DB）
-        jobs.add("{\"env\":{\"job.name\":\"kafka2mysql\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
-                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\","
-                + "\"consumer.group\":\"e2e-group-mysql\",\"commit_on_checkpoint\":false,\"start_mode\":\"earliest\","
-                + SCHEMA_FIELDS + ",\"format\":\"json\"}],"
-                + "\"sink\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + INSERT_QUERY + "\"}]}");
-
-        // ⑨ Kafka -> Kafka（双端真实 MQ 同构）
-        jobs.add("{\"env\":{\"job.name\":\"kafka2kafka\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
-                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\","
-                + "\"consumer.group\":\"e2e-group-kafka\",\"commit_on_checkpoint\":false,\"start_mode\":\"earliest\","
-                + SCHEMA_FIELDS + ",\"format\":\"json\"}],"
-                + "\"sink\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-2\","
-                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\",\"format\":\"json\"}]}");
-
-        // ⑩ Fake -> LocalFile（文件系统写入：Hadoop 系文件连接器类加载路径）
-        jobs.add("{\"env\":{\"job.name\":\"fake2file\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"FakeSource\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
-                + "\"sink\":[{\"plugin_name\":\"LocalFile\",\"path\":\"" + FILE_SINK_BASE_PATH + "/fake2file\","
-                + "\"file_format_type\":\"text\"}]}");
-
-        // ⑪ LocalFile -> SQL transform -> LocalFile（文件到文件 + SQL 转换链路）
-        jobs.add("{\"env\":{\"job.name\":\"file2file_sql\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"LocalFile\",\"path\":\"" + FILE_INPUT_PATH + "\","
-                + "\"file_format_type\":\"csv\",\"plugin_output\":\"t_input\"," + SCHEMA_FIELDS + "}],"
-                + "\"transform\":[{\"plugin_name\":\"Sql\",\"plugin_input\":\"t_input\","
-                + "\"plugin_output\":\"t_output\",\"query\":\"" + SQL_TRANSFORM_QUERY + "\"}],"
-                + "\"sink\":[{\"plugin_name\":\"LocalFile\",\"plugin_input\":\"t_output\","
-                + "\"path\":\"" + FILE_SINK_BASE_PATH + "/file2file\",\"file_format_type\":\"text\"}]}");
-
-        // ⑫ LocalFile -> SQL transform -> MySQL（跨组件混合：文件源 + 转换 + JDBC 落库）
-        jobs.add("{\"env\":{\"job.name\":\"file2mysql_sql\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"LocalFile\",\"path\":\"" + FILE_INPUT_PATH + "\","
-                + "\"file_format_type\":\"csv\",\"plugin_output\":\"t_input\"," + SCHEMA_FIELDS + "}],"
-                + "\"transform\":[{\"plugin_name\":\"Sql\",\"plugin_input\":\"t_input\","
-                + "\"plugin_output\":\"t_mid\",\"query\":\"" + SQL_TRANSFORM_QUERY + "\"}],"
-                + "\"sink\":[{\"plugin_name\":\"Jdbc\",\"plugin_input\":\"t_mid\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + INSERT_QUERY + "\"}]}");
-
-        // ⑬ MySQL -> SQL transform -> Kafka（跨组件混合：JDBC 源 + 转换 + MQ 生产）
-        jobs.add("{\"env\":{\"job.name\":\"mysql2kafka_sql\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + SELECT_QUERY + "\",\"plugin_output\":\"t_src\"," + SCHEMA_FIELDS + "}],"
-                + "\"transform\":[{\"plugin_name\":\"Sql\",\"plugin_input\":\"t_src\","
-                + "\"plugin_output\":\"t_mid\",\"query\":\"" + SQL_TRANSFORM_QUERY + "\"}],"
-                + "\"sink\":[{\"plugin_name\":\"Kafka\",\"plugin_input\":\"t_mid\",\"topic\":\"test-topic-1\","
-                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\",\"format\":\"json\"}]}");
-
+        final String externalDir = System.getProperty("lingframe.test.job.dir");
+        final Path dir;
+        if (externalDir != null && !externalDir.isEmpty()) {
+            dir = Paths.get(externalDir);
+            log.info("Loading job configs from external directory: {}", externalDir);
+        } else {
+            final URL dirUrl = getClass().getClassLoader().getResource("e2e-jobs");
+            if (dirUrl == null) {
+                throw new IllegalStateException("Default e2e-jobs/ directory not found on classpath");
+            }
+            try {
+                dir = Paths.get(dirUrl.toURI());
+            } catch (Exception e) {
+                throw new IllegalStateException("Invalid e2e-jobs/ directory URL: " + dirUrl, e);
+            }
+            log.info("Loading job configs from default classpath directory: e2e-jobs/");
+        }
+        try (Stream<Path> stream = Files.list(dir)) {
+            stream.filter(p -> p.toString().endsWith(".json"))
+                    .sorted()
+                    .forEach(p -> {
+                        try {
+                            jobs.add(new String(Files.readAllBytes(p), StandardCharsets.UTF_8));
+                            log.info("  Loaded: {}", p.getFileName());
+                        } catch (IOException e) {
+                            throw new RuntimeException("Failed to read job config: " + p, e);
+                        }
+                    });
+        }
+        if (jobs.isEmpty()) {
+            throw new IllegalStateException("No .json job configs found in: " + dir);
+        }
+        log.info("Total {} job configs loaded.", jobs.size());
         return jobs;
     }
 

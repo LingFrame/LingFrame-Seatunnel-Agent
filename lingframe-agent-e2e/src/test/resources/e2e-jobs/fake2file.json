@@ -1,0 +1,5 @@
+{
+  "env": {"job.name": "fake2file", "job.mode": "BATCH"},
+  "source": [{"plugin_name": "FakeSource", "row.num": 1000, "schema": {"fields": {"id": "int", "name": "string", "score": "double"}}}],
+  "sink": [{"plugin_name": "LocalFile", "path": "/tmp/seatunnel-e2e-out/fake2file", "file_format_type": "text"}]
+}

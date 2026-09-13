@@ -1,0 +1,6 @@
+{
+  "env": {"job.name": "file2mysql_sql", "job.mode": "BATCH"},
+  "source": [{"plugin_name": "LocalFile", "path": "/opt/seatunnel/e2e-input", "file_format_type": "csv", "plugin_output": "t_input", "schema": {"fields": {"id": "int", "name": "string", "score": "double"}}}],
+  "transform": [{"plugin_name": "Sql", "plugin_input": "t_input", "plugin_output": "t_mid", "query": "select id, name, score from dual where id > 0"}],
+  "sink": [{"plugin_name": "Jdbc", "plugin_input": "t_mid", "url": "jdbc:mysql://mysql-server:3306/test?useSSL=false&allowPublicKeyRetrieval=true", "driver": "com.mysql.cj.jdbc.Driver", "user": "root", "password": "root", "query": "INSERT INTO t_sink (id, name, score) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE name=VALUES(name), score=VALUES(score)"}]
+}

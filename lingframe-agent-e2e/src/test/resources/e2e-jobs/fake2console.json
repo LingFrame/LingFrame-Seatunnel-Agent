@@ -1,0 +1,5 @@
+{
+  "env": {"job.name": "fake2console", "job.mode": "BATCH"},
+  "source": [{"plugin_name": "FakeSource", "row.num": 1000, "schema": {"fields": {"id": "int", "name": "string", "score": "double"}}}],
+  "sink": [{"plugin_name": "Console"}]
+}
