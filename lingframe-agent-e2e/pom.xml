@@ -7,7 +7,7 @@
     <parent>
         <groupId>cn.lingframe.agent</groupId>
         <artifactId>lingframe-seatunnel-agent</artifactId>
-        <version>0.1.0</version>
+        <version>0.2.0</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -127,6 +127,20 @@
                                     <version>${seatunnel.version}</version>
                                     <outputDirectory>${project.build.directory}/connectors/seatunnel</outputDirectory>
                                     <destFileName>connector-kafka.jar</destFileName>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.apache.seatunnel</groupId>
+                                    <artifactId>connector-file-local</artifactId>
+                                    <version>${seatunnel.version}</version>
+                                    <outputDirectory>${project.build.directory}/connectors/seatunnel</outputDirectory>
+                                    <destFileName>connector-file-local.jar</destFileName>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.apache.seatunnel</groupId>
+                                    <artifactId>seatunnel-transforms-v2</artifactId>
+                                    <version>${seatunnel.version}</version>
+                                    <outputDirectory>${project.build.directory}/connectors/seatunnel</outputDirectory>
+                                    <destFileName>seatunnel-transforms-v2.jar</destFileName>
                                 </artifactItem>
                                 <artifactItem>
                                     <groupId>com.mysql</groupId>

@@ -34,7 +34,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>
  * 验证目标：
  * <ol>
- *   <li>阶段一：Source × Sink 3×3 全正交矩阵覆盖（Fake、MySQL JDBC、Kafka KRaft）；</li>
+ *   <li>阶段一：Source × Sink 3×3 全正交矩阵覆盖（Fake、MySQL JDBC、Kafka KRaft），
+ *       外加扩展链路（Fake→LocalFile 文件写入、LocalFile→SQL→LocalFile 文件到文件、
+ *       LocalFile→SQL→Jdbc 与 Jdbc→SQL→Kafka 跨组件混合），共 13 组矩阵；</li>
  *   <li>阶段二：多 Job 异构并发交错执行（考验 ClassLoader 隔离、并发卸载不误伤、线程池 TCCL 防污染）；</li>
  *   <li>阶段三：Full GC 后 Metaspace 物理收敛断言（类彻底卸载，零泄漏）。</li>
  * </ol>
@@ -142,7 +144,7 @@ class MetaspaceLeakIT {
     }
 
     @Test
-    @DisplayName("全正交 9 组矩阵 + 多 Job 异构并发压测后 Metaspace 应完全收敛零泄漏")
+    @DisplayName("全正交矩阵（含文件、SQL transform 与跨组件混合链路）+ 多 Job 异构并发压测后 Metaspace 应完全收敛零泄漏")
     void shouldNotLeakMetaspaceUnderFullMatrixAndConcurrency() throws Exception {
         Assumptions.assumeTrue(isDockerContainerRunning(AGENT_CONTAINER_NAME),
                 "Docker daemon or '" + AGENT_CONTAINER_NAME + "' container is not available, skipping MetaspaceLeakIT");
@@ -313,7 +315,7 @@ class MetaspaceLeakIT {
         final long[] baselineClassCounts = captureClassCounts(containerName);
         final ClassLoaderStatsResult baselineClStats = captureClassLoaderStats(containerName, targetLabel + "-baseline");
 
-        // 2. 阶段一：执行 3×3 全正交 9 组作业矩阵（每组执行 serialRounds 轮）
+        // 2. 阶段一：执行全正交矩阵作业（含文件与 SQL transform 扩展链路，每组执行 serialRounds 轮）
         final int serialRounds = Integer.getInteger("lingframe.test.serial.rounds", 2);
         final List<Long> roundUsed = new ArrayList<>();
         final List<String> allJobIds = new ArrayList<>();
@@ -428,9 +430,15 @@ class MetaspaceLeakIT {
                     + " ON DUPLICATE KEY UPDATE name=VALUES(name), score=VALUES(score)";
     private static final String SELECT_QUERY = "SELECT id, name, score FROM t_source";
 
+    private static final String FILE_INPUT_PATH = "/opt/seatunnel/e2e-input";
+    private static final String FILE_SINK_BASE_PATH = "/tmp/seatunnel-e2e-out";
+    private static final String SQL_TRANSFORM_QUERY = "select name, score from dual where id > 0";
+
     /**
-     * 构建 3×3 = 9 组全正交作业配置。
-     * 组件维度：Fake、MySQL JDBC、Kafka KRaft。
+     * 构建 3×3 = 9 组全正交作业配置，外加扩展链路 4 组，共 13 组：
+     * 文件链路 2 组（Fake→LocalFile、LocalFile→Sql→LocalFile）
+     * 与跨组件 transform 混合链路 2 组（LocalFile→Sql→Jdbc、Jdbc→Sql→Kafka）。
+     * 组件维度：Fake、MySQL JDBC、Kafka KRaft、LocalFile、SQL transform。
      */
     private List<String> buildOrthogonalMatrixJobConfigs() {
         final List<String> jobs = new ArrayList<>();
@@ -502,6 +510,41 @@ class MetaspaceLeakIT {
                 + "\"consumer.group\":\"e2e-group-kafka\",\"commit_on_checkpoint\":false,\"start_mode\":\"earliest\","
                 + SCHEMA_FIELDS + ",\"format\":\"json\"}],"
                 + "\"sink\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-2\","
+                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\",\"format\":\"json\"}]}");
+
+        // ⑩ Fake -> LocalFile（文件系统写入：Hadoop 系文件连接器类加载路径）
+        jobs.add("{\"env\":{\"job.name\":\"fake2file\",\"job.mode\":\"BATCH\"},"
+                + "\"source\":[{\"plugin_name\":\"FakeSource\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
+                + "\"sink\":[{\"plugin_name\":\"LocalFile\",\"path\":\"" + FILE_SINK_BASE_PATH + "/fake2file\","
+                + "\"file_format_type\":\"text\"}]}");
+
+        // ⑪ LocalFile -> SQL transform -> LocalFile（文件到文件 + SQL 转换链路）
+        jobs.add("{\"env\":{\"job.name\":\"file2file_sql\",\"job.mode\":\"BATCH\"},"
+                + "\"source\":[{\"plugin_name\":\"LocalFile\",\"path\":\"" + FILE_INPUT_PATH + "\","
+                + "\"file_format_type\":\"csv\",\"plugin_output\":\"t_input\"," + SCHEMA_FIELDS + "}],"
+                + "\"transform\":[{\"plugin_name\":\"Sql\",\"plugin_input\":\"t_input\","
+                + "\"plugin_output\":\"t_output\",\"query\":\"" + SQL_TRANSFORM_QUERY + "\"}],"
+                + "\"sink\":[{\"plugin_name\":\"LocalFile\",\"plugin_input\":\"t_output\","
+                + "\"path\":\"" + FILE_SINK_BASE_PATH + "/file2file\",\"file_format_type\":\"text\"}]}");
+
+        // ⑫ LocalFile -> SQL transform -> MySQL（跨组件混合：文件源 + 转换 + JDBC 落库）
+        jobs.add("{\"env\":{\"job.name\":\"file2mysql_sql\",\"job.mode\":\"BATCH\"},"
+                + "\"source\":[{\"plugin_name\":\"LocalFile\",\"path\":\"" + FILE_INPUT_PATH + "\","
+                + "\"file_format_type\":\"csv\",\"plugin_output\":\"t_input\"," + SCHEMA_FIELDS + "}],"
+                + "\"transform\":[{\"plugin_name\":\"Sql\",\"plugin_input\":\"t_input\","
+                + "\"plugin_output\":\"t_mid\",\"query\":\"" + SQL_TRANSFORM_QUERY + "\"}],"
+                + "\"sink\":[{\"plugin_name\":\"Jdbc\",\"plugin_input\":\"t_mid\",\"url\":\"" + MYSQL_URL + "\","
+                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
+                + "\"query\":\"" + INSERT_QUERY + "\"}]}");
+
+        // ⑬ MySQL -> SQL transform -> Kafka（跨组件混合：JDBC 源 + 转换 + MQ 生产）
+        jobs.add("{\"env\":{\"job.name\":\"mysql2kafka_sql\",\"job.mode\":\"BATCH\"},"
+                + "\"source\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
+                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
+                + "\"query\":\"" + SELECT_QUERY + "\",\"plugin_output\":\"t_src\"," + SCHEMA_FIELDS + "}],"
+                + "\"transform\":[{\"plugin_name\":\"Sql\",\"plugin_input\":\"t_src\","
+                + "\"plugin_output\":\"t_mid\",\"query\":\"" + SQL_TRANSFORM_QUERY + "\"}],"
+                + "\"sink\":[{\"plugin_name\":\"Kafka\",\"plugin_input\":\"t_mid\",\"topic\":\"test-topic-1\","
                 + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\",\"format\":\"json\"}]}");
 
         return jobs;
