@@ -21,7 +21,7 @@
         <seatunnel.version>2.3.13</seatunnel.version>
         <jacoco.skip>true</jacoco.skip>
         <lingframe.test.serial.rounds>2</lingframe.test.serial.rounds>
-        <lingframe.test.concurrent.rounds>3</lingframe.test.concurrent.rounds>
+        <lingframe.test.concurrent.rounds>5</lingframe.test.concurrent.rounds>
     </properties>
 
     <dependencies>
