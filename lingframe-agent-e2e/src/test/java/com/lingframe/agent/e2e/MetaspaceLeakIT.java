@@ -394,8 +394,19 @@ class MetaspaceLeakIT {
                 .isGreaterThan(10 * 1024 * 1024L);
         log.info("[{}] Metaspace audit started: baseline={} bytes ({})",
                 targetLabel, baseline, formatMb(baseline));
-        final long[] baselineClassCounts = captureClassCounts(containerName);
-        final ClassLoaderStatsResult baselineClStats = captureClassLoaderStats(containerName, targetLabel + "-baseline");
+        // 基线采样并行：classCounts 与 clstats 两个独立 docker exec 并行执行
+        final CompletableFuture<long[]> baselineCountsFuture = CompletableFuture.supplyAsync(() ->
+                captureClassCounts(containerName));
+        final CompletableFuture<ClassLoaderStatsResult> baselineClStatsFuture = CompletableFuture.supplyAsync(() ->
+                captureClassLoaderStats(containerName, targetLabel + "-baseline"));
+        final long[] baselineClassCounts;
+        final ClassLoaderStatsResult baselineClStats;
+        try {
+            baselineClassCounts = baselineCountsFuture.get();
+            baselineClStats = baselineClStatsFuture.get();
+        } catch (Exception e) {
+            throw new RuntimeException("Parallel baseline sampling failed", e);
+        }
 
         // 2. 阶段一：执行全正交矩阵作业（含文件与 SQL transform 扩展链路，每组执行 serialRounds 轮）
         final int serialRounds = Integer.getInteger("lingframe.test.serial.rounds", 2);
@@ -407,7 +418,7 @@ class MetaspaceLeakIT {
                 final String jobTag = targetLabel + "-r" + round + "-j" + (i + 1);
                 final String jobId = submitJob(restUrl, jobTag, applyTopicPrefix(jobConfig, topicPrefix));
                 allJobIds.add(jobId);
-                Thread.sleep(1000);
+                Thread.sleep(200);
             }
             forceFullGcInContainer(containerName);
             final long rUsed = getCurrentMetaspaceUsed(containerName);
@@ -420,7 +431,7 @@ class MetaspaceLeakIT {
         final ExecutorService executor = Executors.newFixedThreadPool(4);
         try {
             final List<CompletableFuture<String>> futures = new ArrayList<>();
-            final int concurrentRounds = Integer.getInteger("lingframe.test.concurrent.rounds", 3);
+            final int concurrentRounds = Integer.getInteger("lingframe.test.concurrent.rounds", 5);
             for (int r = 0; r < concurrentRounds; r++) {
                 final int roundIndex = r;
                 for (int j = 0; j < matrixJobs.size(); j++) {
@@ -445,16 +456,36 @@ class MetaspaceLeakIT {
         }
 
         // 4. 验证所有作业正常 FINISHED（排除崩溃假象——作业提交成功 HTTP 200 不等于执行完成）
-        log.info("[{}] Verifying {} submitted jobs reached FINISHED state...", targetLabel, allJobIds.size());
-        for (int i = 0; i < allJobIds.size(); i++) {
-            final String jobId = allJobIds.get(i);
-            waitForJobFinished(restUrl, jobId, targetLabel + "-job-" + (i + 1), 60, containerName);
+        // 并发验证：多个作业的 REST GET 轮询无副作用，4 线程并行大幅缩减验证耗时
+        log.info("[{}] Verifying {} submitted jobs reached FINISHED state (parallel, 4 threads)...",
+                targetLabel, allJobIds.size());
+        final ExecutorService verifyExecutor = Executors.newFixedThreadPool(4);
+        try {
+            final List<CompletableFuture<Void>> verifyFutures = new ArrayList<>();
+            for (int i = 0; i < allJobIds.size(); i++) {
+                final int idx = i;
+                final String jobId = allJobIds.get(i);
+                verifyFutures.add(CompletableFuture.supplyAsync(() -> {
+                    try {
+                        waitForJobFinished(restUrl, jobId, targetLabel + "-job-" + (idx + 1), 60, containerName);
+                    } catch (IOException e) {
+                        throw new RuntimeException("Job verification failed: " + jobId, e);
+                    }
+                    return null;
+                }, verifyExecutor));
+            }
+            for (CompletableFuture<Void> vf : verifyFutures) {
+                vf.get();
+            }
+        } finally {
+            verifyExecutor.shutdown();
+            verifyExecutor.awaitTermination(10, TimeUnit.SECONDS);
         }
         log.info("[{}] All {} jobs confirmed FINISHED.", targetLabel, allJobIds.size());
 
-        // 5. 等待引擎将所有异步作业生命周期完成与释放
-        // Kafka source 作业消费全量消息可能需要较长时间，30 秒确保所有作业完成
-        Thread.sleep(30000);
+        // 5. 等待引擎内部异步清理（ClassLoader 卸载、Hazelcast IMap evict 等）
+        // 所有作业已确认 FINISHED，此处仅需短暂等待引擎内部异步释放，10 秒足够
+        Thread.sleep(10000);
 
         // 5.5 GC 前 clstats 采样（作业全部 FINISHED 后、Full GC 前）
         final ClassLoaderStatsResult preGcClStats =
