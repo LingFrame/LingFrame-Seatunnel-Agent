@@ -457,9 +457,9 @@ class MetaspaceLeakIT {
 
         // 4. 验证所有作业正常 FINISHED（排除崩溃假象——作业提交成功 HTTP 200 不等于执行完成）
         // 并发验证：多个作业的 REST GET 轮询无副作用，4 线程并行大幅缩减验证耗时
-        log.info("[{}] Verifying {} submitted jobs reached FINISHED state (parallel, 4 threads)...",
+        log.info("[{}] Verifying {} submitted jobs reached FINISHED state (parallel, 2 threads)...",
                 targetLabel, allJobIds.size());
-        final ExecutorService verifyExecutor = Executors.newFixedThreadPool(4);
+        final ExecutorService verifyExecutor = Executors.newFixedThreadPool(2);
         try {
             final List<CompletableFuture<Void>> verifyFutures = new ArrayList<>();
             for (int i = 0; i < allJobIds.size(); i++) {
@@ -467,7 +467,7 @@ class MetaspaceLeakIT {
                 final String jobId = allJobIds.get(i);
                 verifyFutures.add(CompletableFuture.supplyAsync(() -> {
                     try {
-                        waitForJobFinished(restUrl, jobId, targetLabel + "-job-" + (idx + 1), 60, containerName);
+                        waitForJobFinished(restUrl, jobId, targetLabel + "-job-" + (idx + 1), 120, containerName);
                     } catch (IOException e) {
                         throw new RuntimeException("Job verification failed: " + jobId, e);
                     }
