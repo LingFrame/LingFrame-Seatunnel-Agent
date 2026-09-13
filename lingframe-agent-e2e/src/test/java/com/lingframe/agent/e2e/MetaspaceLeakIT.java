@@ -1,5 +1,7 @@
 package com.lingframe.agent.e2e;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -21,9 +23,11 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -41,7 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <ol>
  *   <li>阶段一：Source × Sink 3×3 全正交矩阵覆盖（Fake、MySQL JDBC、Kafka KRaft），
  *       外加扩展链路（Fake→LocalFile 文件写入、LocalFile→SQL→LocalFile 文件到文件、
- *       LocalFile→SQL→Jdbc 与 Jdbc→SQL→Kafka 跨组件混合），共 13 组矩阵；</li>
+ *       LocalFile→SQL→Jdbc 与 Jdbc→SQL→Kafka 跨组件混合），共 14 组矩阵；</li>
  *   <li>阶段二：多 Job 异构并发交错执行（考验 ClassLoader 隔离、并发卸载不误伤、线程池 TCCL 防污染）；</li>
  *   <li>阶段三：Full GC 后 Metaspace 物理收敛断言（类彻底卸载，零泄漏）。</li>
  * </ol>
@@ -178,16 +182,26 @@ class MetaspaceLeakIT {
                 .as("Native control container '%s' must be running for strict A/B audit", NATIVE_CONTAINER_NAME)
                 .isTrue();
 
-        log.info("Starting Control Group benchmark on native SeaTunnel (without agent)...");
-        final MetaspaceAuditResult nativeResult =
-                runTestMatrixAndAudit("Native-Control", NATIVE_REST_URL, NATIVE_CONTAINER_NAME, matrixJobs);
-
-        // 对照组跑完后清空 Kafka topics，确保实验组从干净状态开始（A/B 对比公平性）
-        resetKafkaTopics();
-
-        log.info("Starting Treatment Group benchmark on SeaTunnel with LingFrame Agent...");
-        final MetaspaceAuditResult agentResult =
-                runTestMatrixAndAudit("Agent-Treatment", AGENT_REST_URL, AGENT_CONTAINER_NAME, matrixJobs);
+        log.info("Starting Native-Control and Agent-Treatment benchmarks in parallel"
+                + " (Kafka topics isolated by group prefix)...");
+        final CompletableFuture<MetaspaceAuditResult> nativeFuture = CompletableFuture.supplyAsync(() -> {
+            try {
+                return runTestMatrixAndAudit("Native-Control", NATIVE_REST_URL,
+                        NATIVE_CONTAINER_NAME, matrixJobs, "native-");
+            } catch (Exception e) {
+                throw new RuntimeException("Native-Control benchmark failed", e);
+            }
+        });
+        final CompletableFuture<MetaspaceAuditResult> agentFuture = CompletableFuture.supplyAsync(() -> {
+            try {
+                return runTestMatrixAndAudit("Agent-Treatment", AGENT_REST_URL,
+                        AGENT_CONTAINER_NAME, matrixJobs, "agent-");
+            } catch (Exception e) {
+                throw new RuntimeException("Agent-Treatment benchmark failed", e);
+            }
+        });
+        final MetaspaceAuditResult nativeResult = nativeFuture.get();
+        final MetaspaceAuditResult agentResult = agentFuture.get();
 
         final long netOverhead = agentResult.getNetGrowth() - nativeResult.getNetGrowth();
         log.info("==================== [Metaspace A/B Audit Report] ====================");
@@ -239,10 +253,19 @@ class MetaspaceLeakIT {
         log.info("========================================================================");
 
         // 按 ClassLoader 分组打印类统计，证明 retained classes 归属（非子 CL）
-        dumpClassLoaderStats(AGENT_CONTAINER_NAME, "Agent-Treatment",
-                agentResult.getBaselineClStats(), agentResult.getPreGcClStats());
-        dumpClassLoaderStats(NATIVE_CONTAINER_NAME, "Native-Control",
-                nativeResult.getBaselineClStats(), nativeResult.getPreGcClStats());
+        // 两组 jmap -clstats 并行执行（各自独立 docker exec，互不依赖）
+        final CompletableFuture<Void> agentDumpFuture = CompletableFuture.runAsync(() ->
+                dumpClassLoaderStats(AGENT_CONTAINER_NAME, "Agent-Treatment",
+                        agentResult.getBaselineClStats(), agentResult.getPreGcClStats()));
+        final CompletableFuture<Void> nativeDumpFuture = CompletableFuture.runAsync(() ->
+                dumpClassLoaderStats(NATIVE_CONTAINER_NAME, "Native-Control",
+                        nativeResult.getBaselineClStats(), nativeResult.getPreGcClStats()));
+        try {
+            agentDumpFuture.get();
+            nativeDumpFuture.get();
+        } catch (Exception e) {
+            throw new RuntimeException("Parallel jmap clstats failed", e);
+        }
 
         // ====== 泄漏判定（综合方案：诊断先行 → 断言殿后）======
         // 采样失败（Long.MIN_VALUE）时跳过而非误判
@@ -342,11 +365,24 @@ class MetaspaceLeakIT {
                 .isZero();
     }
 
+    /**
+     * 按组别前缀隔离 Kafka topic，使 Native-Control 和 Agent-Treatment 可并行执行而不交叉污染数据。
+     * 例：topicPrefix="native-" 时，"test-topic-1" → "native-test-topic-1"。
+     */
+    private static String applyTopicPrefix(String jobConfig, String topicPrefix) {
+        if (topicPrefix == null || topicPrefix.isEmpty()) {
+            return jobConfig;
+        }
+        return jobConfig.replace("test-topic-1", topicPrefix + "test-topic-1")
+                         .replace("test-topic-2", topicPrefix + "test-topic-2");
+    }
+
     private MetaspaceAuditResult runTestMatrixAndAudit(
             String targetLabel,
             String restUrl,
             String containerName,
-            List<String> matrixJobs) throws Exception {
+            List<String> matrixJobs,
+            String topicPrefix) throws Exception {
         // 1. 基线采样：记录初始 Metaspace
         forceFullGcInContainer(containerName);
         final long baseline = getCurrentMetaspaceUsed(containerName);
@@ -369,7 +405,7 @@ class MetaspaceLeakIT {
             for (int i = 0; i < matrixJobs.size(); i++) {
                 final String jobConfig = matrixJobs.get(i);
                 final String jobTag = targetLabel + "-r" + round + "-j" + (i + 1);
-                final String jobId = submitJob(restUrl, jobTag, jobConfig);
+                final String jobId = submitJob(restUrl, jobTag, applyTopicPrefix(jobConfig, topicPrefix));
                 allJobIds.add(jobId);
                 Thread.sleep(1000);
             }
@@ -393,7 +429,7 @@ class MetaspaceLeakIT {
                     futures.add(CompletableFuture.supplyAsync(() -> {
                         try {
                             final String tag = targetLabel + "-c-r" + roundIndex + "-j" + jobIndex;
-                            return submitJob(restUrl, tag, jobConfig);
+                            return submitJob(restUrl, tag, applyTopicPrefix(jobConfig, topicPrefix));
                         } catch (Exception e) {
                             throw new RuntimeException("Concurrent job failed", e);
                         }
@@ -494,7 +530,9 @@ class MetaspaceLeakIT {
                     .sorted()
                     .forEach(p -> {
                         try {
-                            jobs.add(new String(Files.readAllBytes(p), StandardCharsets.UTF_8));
+                            final String content = new String(Files.readAllBytes(p), StandardCharsets.UTF_8);
+                            validateJobConfig(p.getFileName().toString(), content);
+                            jobs.add(content);
                             log.info("  Loaded: {}", p.getFileName());
                         } catch (IOException e) {
                             throw new RuntimeException("Failed to read job config: " + p, e);
@@ -506,6 +544,79 @@ class MetaspaceLeakIT {
         }
         log.info("Total {} job configs loaded.", jobs.size());
         return jobs;
+    }
+
+    private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
+
+    /**
+     * 校验作业配置 JSON 的结构完整性与链路连通性。
+     * <p>
+     * 校验项：
+     * <ol>
+     *   <li>JSON 格式合法（能解析为 JsonNode）</li>
+     *   <li>source / sink 数组非空，每个元素有 plugin_name</li>
+     *   <li>transform 若存在，每个元素有 plugin_name / plugin_input / plugin_output</li>
+     *   <li>链路连通性：sink.plugin_input 必须能从 source.plugin_output 或 transform.plugin_output 中找到匹配</li>
+     * </ol>
+     * 校验失败时抛 IllegalStateException，指明文件名和具体问题。
+     */
+    private void validateJobConfig(String fileName, String jsonContent) {
+        final JsonNode root;
+        try {
+            root = JSON_MAPPER.readTree(jsonContent);
+        } catch (Exception e) {
+            throw new IllegalStateException("Invalid JSON syntax in " + fileName + ": " + e.getMessage(), e);
+        }
+        final JsonNode source = root.path("source");
+        if (!source.isArray() || source.isEmpty()) {
+            throw new IllegalStateException("Missing or empty 'source' array in " + fileName);
+        }
+        final JsonNode sink = root.path("sink");
+        if (!sink.isArray() || sink.isEmpty()) {
+            throw new IllegalStateException("Missing or empty 'sink' array in " + fileName);
+        }
+        final Set<String> outputs = new HashSet<>();
+        for (JsonNode node : source) {
+            final String pluginName = node.path("plugin_name").asText("");
+            if (pluginName.isEmpty()) {
+                throw new IllegalStateException("Source entry missing 'plugin_name' in " + fileName);
+            }
+            final String output = node.path("plugin_output").asText("");
+            if (!output.isEmpty()) {
+                outputs.add(output);
+            }
+        }
+        final JsonNode transform = root.path("transform");
+        if (transform.isArray()) {
+            for (JsonNode node : transform) {
+                final String pluginName = node.path("plugin_name").asText("");
+                if (pluginName.isEmpty()) {
+                    throw new IllegalStateException("Transform entry missing 'plugin_name' in " + fileName);
+                }
+                final String input = node.path("plugin_input").asText("");
+                final String output = node.path("plugin_output").asText("");
+                if (input.isEmpty() || output.isEmpty()) {
+                    throw new IllegalStateException("Transform entry missing 'plugin_input' or 'plugin_output' in " + fileName);
+                }
+                if (!outputs.contains(input)) {
+                    throw new IllegalStateException(
+                        "Transform plugin_input '" + input + "' has no matching upstream plugin_output in " + fileName);
+                }
+                outputs.add(output);
+            }
+        }
+        for (JsonNode node : sink) {
+            final String pluginName = node.path("plugin_name").asText("");
+            if (pluginName.isEmpty()) {
+                throw new IllegalStateException("Sink entry missing 'plugin_name' in " + fileName);
+            }
+            final String input = node.path("plugin_input").asText("");
+            if (!input.isEmpty() && !outputs.contains(input)) {
+                throw new IllegalStateException(
+                    "Sink plugin_input '" + input + "' has no matching upstream plugin_output in " + fileName);
+            }
+        }
+        log.info("  Validated: {}", fileName);
     }
 
     private static final int MAX_SUBMIT_RETRIES = 3;
@@ -801,38 +912,6 @@ class MetaspaceLeakIT {
         return null;
     }
 
-    /**
-     * 删除 Kafka topics 以在对照组和实验组之间重置消息状态。
-     * <p>
-     * 两组共用同一个 Kafka 集群，对照组的 Kafka sink 作业会向 {@code test-topic-1} 生产消息。
-     * 若不清空，实验组的 Kafka source 作业从 earliest 消费会读到对照组残留消息，
-     * 导致处理双倍数据量，破坏 A/B 对比公平性。
-     * <p>
-     * 删除后依赖 {@code KAFKA_AUTO_CREATE_TOPICS_ENABLE=true} 自动重建。
-     */
-    private void resetKafkaTopics() throws IOException, InterruptedException {
-        log.info("Resetting Kafka topics between Control and Treatment groups...");
-        final String[] topics = {"test-topic-1", "test-topic-2"};
-        for (String topic : topics) {
-            final ProcessBuilder pb = new ProcessBuilder(
-                    "docker", "exec", "kafka-server",
-                    "/opt/kafka/bin/kafka-topics.sh",
-                    "--bootstrap-server", "localhost:9092",
-                    "--delete", "--topic", topic);
-            pb.redirectErrorStream(true);
-            final Process p = pb.start();
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    log.info("[kafka-reset] {}", line);
-                }
-            }
-            p.waitFor(10, TimeUnit.SECONDS);
-        }
-        Thread.sleep(3000);
-        log.info("Kafka topics reset completed.");
-    }
 
     private static String extractJsonField(String json, String fieldName) {
         final Pattern p = Pattern.compile("\"" + fieldName + "\"\\s*:\\s*\"([^\"]+)\"");

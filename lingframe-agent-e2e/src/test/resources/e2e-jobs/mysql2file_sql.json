@@ -1,0 +1,6 @@
+{
+  "env": {"job.name": "mysql2file_sql", "job.mode": "BATCH"},
+  "source": [{"plugin_name": "Jdbc", "url": "jdbc:mysql://mysql-server:3306/test?useSSL=false&allowPublicKeyRetrieval=true", "driver": "com.mysql.cj.jdbc.Driver", "user": "root", "password": "root", "query": "SELECT id, name, score FROM t_source", "plugin_output": "t_src", "schema": {"fields": {"id": "int", "name": "string", "score": "double"}}}],
+  "transform": [{"plugin_name": "Sql", "plugin_input": "t_src", "plugin_output": "t_mid", "query": "select id, name, score from dual where id > 0"}],
+  "sink": [{"plugin_name": "LocalFile", "plugin_input": "t_mid", "path": "/tmp/seatunnel-e2e-out/mysql2file_sql", "file_format_type": "text"}]
+}
