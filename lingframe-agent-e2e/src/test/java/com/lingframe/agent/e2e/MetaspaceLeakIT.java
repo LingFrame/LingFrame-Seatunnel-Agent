@@ -455,6 +455,11 @@ class MetaspaceLeakIT {
             executor.awaitTermination(10, TimeUnit.SECONDS);
         }
 
+        // 3.5 并发提交后等待 60s，让 SeaTunnel 先完成一批作业再开始验证
+        // 避免大量作业同时运行压垮 REST 端点（Native 组无 ClassLoader 回收，重负载下 REST 卡死）
+        log.info("[{}] Waiting 60s for SeaTunnel to process batch jobs before verification...", targetLabel);
+        Thread.sleep(60000);
+
         // 4. 验证所有作业正常 FINISHED（排除崩溃假象——作业提交成功 HTTP 200 不等于执行完成）
         // 并发验证：多个作业的 REST GET 轮询无副作用，4 线程并行大幅缩减验证耗时
         log.info("[{}] Verifying {} submitted jobs reached FINISHED state (parallel, 2 threads)...",
@@ -467,7 +472,7 @@ class MetaspaceLeakIT {
                 final String jobId = allJobIds.get(i);
                 verifyFutures.add(CompletableFuture.supplyAsync(() -> {
                     try {
-                        waitForJobFinished(restUrl, jobId, targetLabel + "-job-" + (idx + 1), 120, containerName);
+                        waitForJobFinished(restUrl, jobId, targetLabel + "-job-" + (idx + 1), 240, containerName);
                     } catch (IOException e) {
                         throw new RuntimeException("Job verification failed: " + jobId, e);
                     }
@@ -746,7 +751,7 @@ class MetaspaceLeakIT {
             try {
                 conn.setRequestMethod("GET");
                 conn.setConnectTimeout(5000);
-                conn.setReadTimeout(30000);
+                conn.setReadTimeout(10000);
                 final int responseCode = conn.getResponseCode();
                 if (responseCode == 200) {
                     final String body;
