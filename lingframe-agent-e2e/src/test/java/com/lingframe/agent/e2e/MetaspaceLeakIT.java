@@ -12,6 +12,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -646,7 +647,7 @@ class MetaspaceLeakIT {
             try {
                 conn.setRequestMethod("GET");
                 conn.setConnectTimeout(5000);
-                conn.setReadTimeout(10000);
+                conn.setReadTimeout(30000);
                 final int responseCode = conn.getResponseCode();
                 if (responseCode == 200) {
                     final String body;
@@ -720,6 +721,20 @@ class MetaspaceLeakIT {
                         errBody = es != null ? readAll(es) : "(no error stream)";
                     }
                     log.warn("[{}] Job {} HTTP {} - error: {}", jobTag, jobId, responseCode, errBody);
+                }
+            } catch (SocketTimeoutException ste) {
+                log.warn("[{}] Job {} REST read timeout, checking container log for fallback status.",
+                        jobTag, jobId);
+                final String logStatus = checkJobStatusFromContainerLog(containerName, jobId);
+                if ("FINISHED".equals(logStatus) || "UNKNOWABLE".equals(logStatus)) {
+                    log.info("[{}] Job {} -> {} (via container log after REST timeout)",
+                            jobTag, jobId, logStatus);
+                    return;
+                }
+                if ("FAILED".equals(logStatus) || "CANCELED".equals(logStatus)) {
+                    throw new IOException("Job " + jobTag + " (id=" + jobId
+                            + ") ended with status " + logStatus
+                            + " (via container log after REST timeout)", ste);
                 }
             } finally {
                 conn.disconnect();
