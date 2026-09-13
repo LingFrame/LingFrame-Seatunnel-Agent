@@ -432,7 +432,7 @@ class MetaspaceLeakIT {
 
     private static final String FILE_INPUT_PATH = "/opt/seatunnel/e2e-input";
     private static final String FILE_SINK_BASE_PATH = "/tmp/seatunnel-e2e-out";
-    private static final String SQL_TRANSFORM_QUERY = "select name, score from dual where id > 0";
+    private static final String SQL_TRANSFORM_QUERY = "select id, name, score from dual where id > 0";
 
     /**
      * 构建 3×3 = 9 组全正交作业配置，外加扩展链路 4 组，共 13 组：
