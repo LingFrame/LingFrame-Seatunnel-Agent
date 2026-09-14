@@ -1,0 +1,5 @@
+{
+  "env": {"job.name": "mysql2console", "job.mode": "BATCH"},
+  "source": [{"plugin_name": "Jdbc", "url": "jdbc:mysql://mysql-server:3306/test?useSSL=false&allowPublicKeyRetrieval=true", "driver": "com.mysql.cj.jdbc.Driver", "user": "root", "password": "root", "query": "SELECT id, name, score FROM t_source", "schema": {"fields": {"id": "int", "name": "string", "score": "double"}}}],
+  "sink": [{"plugin_name": "Console"}]
+}

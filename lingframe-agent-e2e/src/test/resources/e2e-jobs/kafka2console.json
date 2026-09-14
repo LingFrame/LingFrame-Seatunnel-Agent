@@ -1,0 +1,5 @@
+{
+  "env": {"job.name": "kafka2console", "job.mode": "BATCH"},
+  "source": [{"plugin_name": "Kafka", "topic": "test-topic-1", "bootstrap.servers": "kafka-server:9092", "consumer.group": "e2e-group-console", "commit_on_checkpoint": false, "start_mode": "earliest", "schema": {"fields": {"id": "int", "name": "string", "score": "double"}}, "format": "json"}],
+  "sink": [{"plugin_name": "Console"}]
+}

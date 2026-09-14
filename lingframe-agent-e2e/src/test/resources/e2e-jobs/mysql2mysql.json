@@ -1,0 +1,5 @@
+{
+  "env": {"job.name": "mysql2mysql", "job.mode": "BATCH"},
+  "source": [{"plugin_name": "Jdbc", "url": "jdbc:mysql://mysql-server:3306/test?useSSL=false&allowPublicKeyRetrieval=true", "driver": "com.mysql.cj.jdbc.Driver", "user": "root", "password": "root", "query": "SELECT id, name, score FROM t_source", "schema": {"fields": {"id": "int", "name": "string", "score": "double"}}}],
+  "sink": [{"plugin_name": "Jdbc", "url": "jdbc:mysql://mysql-server:3306/test?useSSL=false&allowPublicKeyRetrieval=true", "driver": "com.mysql.cj.jdbc.Driver", "user": "root", "password": "root", "query": "INSERT INTO t_sink (id, name, score) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE name=VALUES(name), score=VALUES(score)"}]
+}

@@ -1,0 +1,5 @@
+{
+  "env": {"job.name": "kafka2mysql", "job.mode": "BATCH"},
+  "source": [{"plugin_name": "Kafka", "topic": "test-topic-1", "bootstrap.servers": "kafka-server:9092", "consumer.group": "e2e-group-mysql", "commit_on_checkpoint": false, "start_mode": "earliest", "schema": {"fields": {"id": "int", "name": "string", "score": "double"}}, "format": "json"}],
+  "sink": [{"plugin_name": "Jdbc", "url": "jdbc:mysql://mysql-server:3306/test?useSSL=false&allowPublicKeyRetrieval=true", "driver": "com.mysql.cj.jdbc.Driver", "user": "root", "password": "root", "query": "INSERT INTO t_sink (id, name, score) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE name=VALUES(name), score=VALUES(score)"}]
+}

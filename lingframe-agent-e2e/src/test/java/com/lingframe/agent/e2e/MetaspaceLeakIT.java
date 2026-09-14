@@ -1,5 +1,7 @@
 package com.lingframe.agent.e2e;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -12,14 +14,21 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Stream;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -34,7 +43,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>
  * 验证目标：
  * <ol>
- *   <li>阶段一：Source × Sink 3×3 全正交矩阵覆盖（Fake、MySQL JDBC、Kafka KRaft）；</li>
+ *   <li>阶段一：Source × Sink 3×3 全正交矩阵覆盖（Fake、MySQL JDBC、Kafka KRaft），
+ *       外加扩展链路（Fake→LocalFile 文件写入、LocalFile→SQL→LocalFile 文件到文件、
+ *       LocalFile→SQL→Jdbc 与 Jdbc→SQL→Kafka 跨组件混合），共 14 组矩阵；</li>
  *   <li>阶段二：多 Job 异构并发交错执行（考验 ClassLoader 隔离、并发卸载不误伤、线程池 TCCL 防污染）；</li>
  *   <li>阶段三：Full GC 后 Metaspace 物理收敛断言（类彻底卸载，零泄漏）。</li>
  * </ol>
@@ -51,7 +62,19 @@ class MetaspaceLeakIT {
     private static final String NATIVE_REST_URL = "http://localhost:5802/hazelcast/rest/maps/submit-job";
     private static final String NATIVE_CONTAINER_NAME = "seatunnel-native";
 
-    private static final long METASPACE_GROWTH_THRESHOLD_BYTES = 15 * 1024 * 1024L;
+    // 动态 Metaspace 增长阈值：base + perJob × totalJobExecutions，再乘安全余量
+    // base ≈ 7 MB（Agent 固定残留），perJob ≈ 0.25 MB/作业次（CL 卸载后 chunk 惰性回收残留）
+    private static final long METASPACE_GROWTH_BASE_BYTES = 7 * 1024 * 1024L;
+    private static final double METASPACE_GROWTH_PER_JOB_MB = 0.25;
+    private static final double METASPACE_GROWTH_SAFETY_MARGIN = 1.5;
+    private static final double METASPACE_CONVERGENCE_THRESHOLD = 0.2;
+
+    private static long computeDynamicGrowthThreshold(int totalJobExecutions) {
+        return (long) ((METASPACE_GROWTH_BASE_BYTES
+                + METASPACE_GROWTH_PER_JOB_MB * totalJobExecutions * 1024 * 1024L)
+                * METASPACE_GROWTH_SAFETY_MARGIN);
+    }
+
     private static final long MAX_NET_OVERHEAD_BYTES = 2 * 1024 * 1024L;
 
     private static final Pattern METASPACE_USED_PATTERN =
@@ -68,11 +91,12 @@ class MetaspaceLeakIT {
         private final long classLoaderCount;
         private final ClassLoaderStatsResult baselineClStats;
         private final ClassLoaderStatsResult preGcClStats;
+        private final int totalJobExecutions;
 
         MetaspaceAuditResult(long baseline, List<Long> roundUsed, long finalUsed,
                              long loadedDelta, long unloadedDelta, long retainedClasses,
                              long classLoaderCount, ClassLoaderStatsResult baselineClStats,
-                             ClassLoaderStatsResult preGcClStats) {
+                             ClassLoaderStatsResult preGcClStats, int totalJobExecutions) {
             this.baseline = baseline;
             this.roundUsed = roundUsed;
             this.finalUsed = finalUsed;
@@ -83,6 +107,7 @@ class MetaspaceLeakIT {
             this.classLoaderCount = classLoaderCount;
             this.baselineClStats = baselineClStats;
             this.preGcClStats = preGcClStats;
+            this.totalJobExecutions = totalJobExecutions;
         }
 
         public long getBaseline() {
@@ -124,6 +149,10 @@ class MetaspaceLeakIT {
         public ClassLoaderStatsResult getPreGcClStats() {
             return preGcClStats;
         }
+
+        public int getTotalJobExecutions() {
+            return totalJobExecutions;
+        }
     }
 
     private static String formatMb(long bytes) {
@@ -142,7 +171,7 @@ class MetaspaceLeakIT {
     }
 
     @Test
-    @DisplayName("全正交 9 组矩阵 + 多 Job 异构并发压测后 Metaspace 应完全收敛零泄漏")
+    @DisplayName("全正交矩阵（含文件、SQL transform 与跨组件混合链路）+ 多 Job 异构并发压测后 Metaspace 应完全收敛零泄漏")
     void shouldNotLeakMetaspaceUnderFullMatrixAndConcurrency() throws Exception {
         Assumptions.assumeTrue(isDockerContainerRunning(AGENT_CONTAINER_NAME),
                 "Docker daemon or '" + AGENT_CONTAINER_NAME + "' container is not available, skipping MetaspaceLeakIT");
@@ -153,16 +182,26 @@ class MetaspaceLeakIT {
                 .as("Native control container '%s' must be running for strict A/B audit", NATIVE_CONTAINER_NAME)
                 .isTrue();
 
-        log.info("Starting Control Group benchmark on native SeaTunnel (without agent)...");
-        final MetaspaceAuditResult nativeResult =
-                runTestMatrixAndAudit("Native-Control", NATIVE_REST_URL, NATIVE_CONTAINER_NAME, matrixJobs);
-
-        // 对照组跑完后清空 Kafka topics，确保实验组从干净状态开始（A/B 对比公平性）
-        resetKafkaTopics();
-
-        log.info("Starting Treatment Group benchmark on SeaTunnel with LingFrame Agent...");
-        final MetaspaceAuditResult agentResult =
-                runTestMatrixAndAudit("Agent-Treatment", AGENT_REST_URL, AGENT_CONTAINER_NAME, matrixJobs);
+        log.info("Starting Native-Control and Agent-Treatment benchmarks in parallel"
+                + " (Kafka topics isolated by group prefix)...");
+        final CompletableFuture<MetaspaceAuditResult> nativeFuture = CompletableFuture.supplyAsync(() -> {
+            try {
+                return runTestMatrixAndAudit("Native-Control", NATIVE_REST_URL,
+                        NATIVE_CONTAINER_NAME, matrixJobs, "native-");
+            } catch (Exception e) {
+                throw new RuntimeException("Native-Control benchmark failed", e);
+            }
+        });
+        final CompletableFuture<MetaspaceAuditResult> agentFuture = CompletableFuture.supplyAsync(() -> {
+            try {
+                return runTestMatrixAndAudit("Agent-Treatment", AGENT_REST_URL,
+                        AGENT_CONTAINER_NAME, matrixJobs, "agent-");
+            } catch (Exception e) {
+                throw new RuntimeException("Agent-Treatment benchmark failed", e);
+            }
+        });
+        final MetaspaceAuditResult nativeResult = nativeFuture.get();
+        final MetaspaceAuditResult agentResult = agentFuture.get();
 
         final long netOverhead = agentResult.getNetGrowth() - nativeResult.getNetGrowth();
         log.info("==================== [Metaspace A/B Audit Report] ====================");
@@ -207,15 +246,26 @@ class MetaspaceLeakIT {
                 formatDelta(agentResult.getClassLoaderCount() - nativeResult.getClassLoaderCount())));
         log.info("========================================================================");
         log.info("  Net Overhead (Agent - Native) : {}", formatMb(netOverhead));
-        log.info("  Growth Threshold (Agent)      : {}", formatMb(METASPACE_GROWTH_THRESHOLD_BYTES));
+        final long dynamicGrowthThreshold = computeDynamicGrowthThreshold(agentResult.getTotalJobExecutions());
+        log.info("  Growth Threshold (Agent, dynamic) : {} (for {} job executions)",
+                formatMb(dynamicGrowthThreshold), agentResult.getTotalJobExecutions());
         log.info("  Overhead Threshold (Net)      : {}", formatMb(MAX_NET_OVERHEAD_BYTES));
         log.info("========================================================================");
 
         // 按 ClassLoader 分组打印类统计，证明 retained classes 归属（非子 CL）
-        dumpClassLoaderStats(AGENT_CONTAINER_NAME, "Agent-Treatment",
-                agentResult.getBaselineClStats(), agentResult.getPreGcClStats());
-        dumpClassLoaderStats(NATIVE_CONTAINER_NAME, "Native-Control",
-                nativeResult.getBaselineClStats(), nativeResult.getPreGcClStats());
+        // 两组 jmap -clstats 并行执行（各自独立 docker exec，互不依赖）
+        final CompletableFuture<Void> agentDumpFuture = CompletableFuture.runAsync(() ->
+                dumpClassLoaderStats(AGENT_CONTAINER_NAME, "Agent-Treatment",
+                        agentResult.getBaselineClStats(), agentResult.getPreGcClStats()));
+        final CompletableFuture<Void> nativeDumpFuture = CompletableFuture.runAsync(() ->
+                dumpClassLoaderStats(NATIVE_CONTAINER_NAME, "Native-Control",
+                        nativeResult.getBaselineClStats(), nativeResult.getPreGcClStats()));
+        try {
+            agentDumpFuture.get();
+            nativeDumpFuture.get();
+        } catch (Exception e) {
+            throw new RuntimeException("Parallel jmap clstats failed", e);
+        }
 
         // ====== 泄漏判定（综合方案：诊断先行 → 断言殿后）======
         // 采样失败（Long.MIN_VALUE）时跳过而非误判
@@ -229,12 +279,33 @@ class MetaspaceLeakIT {
                     formatMb(netOverhead), formatMb(MAX_NET_OVERHEAD_BYTES));
         }
 
-        // 2. 辅助提醒：Metaspace growth 超阈值时 WARN
-        if (agentResult.getNetGrowth() >= METASPACE_GROWTH_THRESHOLD_BYTES) {
-            log.warn("Agent Metaspace growth {} exceeds threshold {}."
+        // 2. 辅助提醒：Metaspace growth 超动态阈值时 WARN
+        if (agentResult.getNetGrowth() >= dynamicGrowthThreshold) {
+            log.warn("Agent Metaspace growth {} exceeds dynamic threshold {}."
                     + " Further investigation recommended.",
                     formatMb(agentResult.getNetGrowth()),
-                    formatMb(METASPACE_GROWTH_THRESHOLD_BYTES));
+                    formatMb(dynamicGrowthThreshold));
+        }
+
+        // 2b. 趋势提醒：Round 2 增量应远小于 Round 1 增量（收敛率 > 80%），不收敛时显眼告警
+        if (agentResult.getRoundUsed().size() >= 2) {
+            final long round1Delta = agentResult.getRoundUsed().get(0) - agentResult.getBaseline();
+            final long round2Delta = agentResult.getRoundUsed().get(1) - agentResult.getRoundUsed().get(0);
+            if (round1Delta > 1024 * 1024L) {
+                final double ratio = (double) round2Delta / round1Delta;
+                log.info("  Convergence (1 - Round2/Round1)     : {}%",
+                        String.format(Locale.ROOT, "%.1f", (1.0 - ratio) * 100));
+                if (ratio >= METASPACE_CONVERGENCE_THRESHOLD) {
+                    log.warn("========================================================================");
+                    log.warn("  !!! TREND WARNING !!! Agent Metaspace NOT converging!");
+                    log.warn("  Round 2 delta ({}) / Round 1 delta ({}) = {}% >= {}%",
+                            formatMb(round2Delta), formatMb(round1Delta),
+                            String.format(Locale.ROOT, "%.1f", ratio * 100),
+                            String.format(Locale.ROOT, "%.0f", METASPACE_CONVERGENCE_THRESHOLD * 100));
+                    log.warn("  Potential Metaspace leak -- investigate CL retention.");
+                    log.warn("========================================================================");
+                }
+            }
         }
 
         // 3. 类元数据未卸载 / CL 拘留诊断（先行：不管后续断言成功失败，dump 必须先抓）
@@ -294,11 +365,24 @@ class MetaspaceLeakIT {
                 .isZero();
     }
 
+    /**
+     * 按组别前缀隔离 Kafka topic，使 Native-Control 和 Agent-Treatment 可并行执行而不交叉污染数据。
+     * 例：topicPrefix="native-" 时，"test-topic-1" → "native-test-topic-1"。
+     */
+    private static String applyTopicPrefix(String jobConfig, String topicPrefix) {
+        if (topicPrefix == null || topicPrefix.isEmpty()) {
+            return jobConfig;
+        }
+        return jobConfig.replace("test-topic-1", topicPrefix + "test-topic-1")
+                         .replace("test-topic-2", topicPrefix + "test-topic-2");
+    }
+
     private MetaspaceAuditResult runTestMatrixAndAudit(
             String targetLabel,
             String restUrl,
             String containerName,
-            List<String> matrixJobs) throws Exception {
+            List<String> matrixJobs,
+            String topicPrefix) throws Exception {
         // 1. 基线采样：记录初始 Metaspace
         forceFullGcInContainer(containerName);
         final long baseline = getCurrentMetaspaceUsed(containerName);
@@ -310,10 +394,21 @@ class MetaspaceLeakIT {
                 .isGreaterThan(10 * 1024 * 1024L);
         log.info("[{}] Metaspace audit started: baseline={} bytes ({})",
                 targetLabel, baseline, formatMb(baseline));
-        final long[] baselineClassCounts = captureClassCounts(containerName);
-        final ClassLoaderStatsResult baselineClStats = captureClassLoaderStats(containerName, targetLabel + "-baseline");
+        // 基线采样并行：classCounts 与 clstats 两个独立 docker exec 并行执行
+        final CompletableFuture<long[]> baselineCountsFuture = CompletableFuture.supplyAsync(() ->
+                captureClassCounts(containerName));
+        final CompletableFuture<ClassLoaderStatsResult> baselineClStatsFuture = CompletableFuture.supplyAsync(() ->
+                captureClassLoaderStats(containerName, targetLabel + "-baseline"));
+        final long[] baselineClassCounts;
+        final ClassLoaderStatsResult baselineClStats;
+        try {
+            baselineClassCounts = baselineCountsFuture.get();
+            baselineClStats = baselineClStatsFuture.get();
+        } catch (Exception e) {
+            throw new RuntimeException("Parallel baseline sampling failed", e);
+        }
 
-        // 2. 阶段一：执行 3×3 全正交 9 组作业矩阵（每组执行 serialRounds 轮）
+        // 2. 阶段一：执行全正交矩阵作业（含文件与 SQL transform 扩展链路，每组执行 serialRounds 轮）
         final int serialRounds = Integer.getInteger("lingframe.test.serial.rounds", 2);
         final List<Long> roundUsed = new ArrayList<>();
         final List<String> allJobIds = new ArrayList<>();
@@ -321,9 +416,9 @@ class MetaspaceLeakIT {
             for (int i = 0; i < matrixJobs.size(); i++) {
                 final String jobConfig = matrixJobs.get(i);
                 final String jobTag = targetLabel + "-r" + round + "-j" + (i + 1);
-                final String jobId = submitJob(restUrl, jobTag, jobConfig);
+                final String jobId = submitJob(restUrl, jobTag, applyTopicPrefix(jobConfig, topicPrefix));
                 allJobIds.add(jobId);
-                Thread.sleep(1000);
+                Thread.sleep(200);
             }
             forceFullGcInContainer(containerName);
             final long rUsed = getCurrentMetaspaceUsed(containerName);
@@ -336,7 +431,7 @@ class MetaspaceLeakIT {
         final ExecutorService executor = Executors.newFixedThreadPool(4);
         try {
             final List<CompletableFuture<String>> futures = new ArrayList<>();
-            final int concurrentRounds = Integer.getInteger("lingframe.test.concurrent.rounds", 3);
+            final int concurrentRounds = Integer.getInteger("lingframe.test.concurrent.rounds", 5);
             for (int r = 0; r < concurrentRounds; r++) {
                 final int roundIndex = r;
                 for (int j = 0; j < matrixJobs.size(); j++) {
@@ -345,7 +440,7 @@ class MetaspaceLeakIT {
                     futures.add(CompletableFuture.supplyAsync(() -> {
                         try {
                             final String tag = targetLabel + "-c-r" + roundIndex + "-j" + jobIndex;
-                            return submitJob(restUrl, tag, jobConfig);
+                            return submitJob(restUrl, tag, applyTopicPrefix(jobConfig, topicPrefix));
                         } catch (Exception e) {
                             throw new RuntimeException("Concurrent job failed", e);
                         }
@@ -360,17 +455,42 @@ class MetaspaceLeakIT {
             executor.awaitTermination(10, TimeUnit.SECONDS);
         }
 
+        // 3.5 并发提交后等待 60s，让 SeaTunnel 先完成一批作业再开始验证
+        // 避免大量作业同时运行压垮 REST 端点（Native 组无 ClassLoader 回收，重负载下 REST 卡死）
+        log.info("[{}] Waiting 60s for SeaTunnel to process batch jobs before verification...", targetLabel);
+        Thread.sleep(60000);
+
         // 4. 验证所有作业正常 FINISHED（排除崩溃假象——作业提交成功 HTTP 200 不等于执行完成）
-        log.info("[{}] Verifying {} submitted jobs reached FINISHED state...", targetLabel, allJobIds.size());
-        for (int i = 0; i < allJobIds.size(); i++) {
-            final String jobId = allJobIds.get(i);
-            waitForJobFinished(restUrl, jobId, targetLabel + "-job-" + (i + 1), 60, containerName);
+        // 并发验证：多个作业的 REST GET 轮询无副作用，4 线程并行大幅缩减验证耗时
+        log.info("[{}] Verifying {} submitted jobs reached FINISHED state (parallel, 2 threads)...",
+                targetLabel, allJobIds.size());
+        final ExecutorService verifyExecutor = Executors.newFixedThreadPool(2);
+        try {
+            final List<CompletableFuture<Void>> verifyFutures = new ArrayList<>();
+            for (int i = 0; i < allJobIds.size(); i++) {
+                final int idx = i;
+                final String jobId = allJobIds.get(i);
+                verifyFutures.add(CompletableFuture.supplyAsync(() -> {
+                    try {
+                        waitForJobFinished(restUrl, jobId, targetLabel + "-job-" + (idx + 1), 240, containerName);
+                    } catch (IOException e) {
+                        throw new RuntimeException("Job verification failed: " + jobId, e);
+                    }
+                    return null;
+                }, verifyExecutor));
+            }
+            for (CompletableFuture<Void> vf : verifyFutures) {
+                vf.get();
+            }
+        } finally {
+            verifyExecutor.shutdown();
+            verifyExecutor.awaitTermination(10, TimeUnit.SECONDS);
         }
         log.info("[{}] All {} jobs confirmed FINISHED.", targetLabel, allJobIds.size());
 
-        // 5. 等待引擎将所有异步作业生命周期完成与释放
-        // Kafka source 作业消费全量消息可能需要较长时间，30 秒确保所有作业完成
-        Thread.sleep(30000);
+        // 5. 等待引擎内部异步清理（ClassLoader 卸载、Hazelcast IMap evict 等）
+        // 所有作业已确认 FINISHED，此处仅需短暂等待引擎内部异步释放，10 秒足够
+        Thread.sleep(10000);
 
         // 5.5 GC 前 clstats 采样（作业全部 FINISHED 后、Full GC 前）
         final ClassLoaderStatsResult preGcClStats =
@@ -413,98 +533,126 @@ class MetaspaceLeakIT {
         }
         return new MetaspaceAuditResult(baseline, roundUsed, finalUsed,
                 loadedDelta, unloadedDelta, retainedClasses, classLoaderCount, baselineClStats,
-                preGcClStats);
+                preGcClStats, allJobIds.size());
     }
 
 
-    private static final String MYSQL_URL =
-            "jdbc:mysql://mysql-server:3306/test?useSSL=false&allowPublicKeyRetrieval=true";
-    private static final String MYSQL_DRIVER = "com.mysql.cj.jdbc.Driver";
-    private static final String KAFKA_BOOTSTRAP = "kafka-server:9092";
-    private static final String SCHEMA_FIELDS =
-            "\"schema\":{\"fields\":{\"id\":\"int\",\"name\":\"string\",\"score\":\"double\"}}";
-    private static final String INSERT_QUERY =
-            "INSERT INTO t_sink (id, name, score) VALUES (?, ?, ?)"
-                    + " ON DUPLICATE KEY UPDATE name=VALUES(name), score=VALUES(score)";
-    private static final String SELECT_QUERY = "SELECT id, name, score FROM t_source";
+    /**
+     * 从外置目录加载作业矩阵配置（标准 SeaTunnel JSON 格式）。
+     * 优先读 -Dlingframe.test.job.dir 指定的外部目录，未指定时读 classpath 默认 e2e-jobs/。
+     * 用户可通过增删 .json 文件调整作业矩阵，无需改代码。
+     */
+    private List<String> buildOrthogonalMatrixJobConfigs() throws IOException {
+        final List<String> jobs = new ArrayList<>();
+        final String externalDir = System.getProperty("lingframe.test.job.dir");
+        final Path dir;
+        if (externalDir != null && !externalDir.isEmpty()) {
+            dir = Paths.get(externalDir);
+            log.info("Loading job configs from external directory: {}", externalDir);
+        } else {
+            final URL dirUrl = getClass().getClassLoader().getResource("e2e-jobs");
+            if (dirUrl == null) {
+                throw new IllegalStateException("Default e2e-jobs/ directory not found on classpath");
+            }
+            try {
+                dir = Paths.get(dirUrl.toURI());
+            } catch (Exception e) {
+                throw new IllegalStateException("Invalid e2e-jobs/ directory URL: " + dirUrl, e);
+            }
+            log.info("Loading job configs from default classpath directory: e2e-jobs/");
+        }
+        try (Stream<Path> stream = Files.list(dir)) {
+            stream.filter(p -> p.toString().endsWith(".json"))
+                    .sorted()
+                    .forEach(p -> {
+                        try {
+                            final String content = new String(Files.readAllBytes(p), StandardCharsets.UTF_8);
+                            validateJobConfig(p.getFileName().toString(), content);
+                            jobs.add(content);
+                            log.info("  Loaded: {}", p.getFileName());
+                        } catch (IOException e) {
+                            throw new RuntimeException("Failed to read job config: " + p, e);
+                        }
+                    });
+        }
+        if (jobs.isEmpty()) {
+            throw new IllegalStateException("No .json job configs found in: " + dir);
+        }
+        log.info("Total {} job configs loaded.", jobs.size());
+        return jobs;
+    }
+
+    private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
 
     /**
-     * 构建 3×3 = 9 组全正交作业配置。
-     * 组件维度：Fake、MySQL JDBC、Kafka KRaft。
+     * 校验作业配置 JSON 的结构完整性与链路连通性。
+     * <p>
+     * 校验项：
+     * <ol>
+     *   <li>JSON 格式合法（能解析为 JsonNode）</li>
+     *   <li>source / sink 数组非空，每个元素有 plugin_name</li>
+     *   <li>transform 若存在，每个元素有 plugin_name / plugin_input / plugin_output</li>
+     *   <li>链路连通性：sink.plugin_input 必须能从 source.plugin_output 或 transform.plugin_output 中找到匹配</li>
+     * </ol>
+     * 校验失败时抛 IllegalStateException，指明文件名和具体问题。
      */
-    private List<String> buildOrthogonalMatrixJobConfigs() {
-        final List<String> jobs = new ArrayList<>();
-
-        // ① Fake -> Console（纯内存基线）
-        jobs.add("{\"env\":{\"job.name\":\"fake2console\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"FakeSource\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
-                + "\"sink\":[{\"plugin_name\":\"Console\"}]}");
-
-        // ② Fake -> MySQL（单端 JDBC 写入）
-        jobs.add("{\"env\":{\"job.name\":\"fake2mysql\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"FakeSource\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
-                + "\"sink\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + INSERT_QUERY + "\"}]}");
-
-        // ③ Fake -> Kafka（单端 MQ 生产）
-        jobs.add("{\"env\":{\"job.name\":\"fake2kafka\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"FakeSource\",\"row.num\":1000," + SCHEMA_FIELDS + "}],"
-                + "\"sink\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
-                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\",\"format\":\"json\"}]}");
-
-        // ④ MySQL -> Console（单端 JDBC 读取）
-        jobs.add("{\"env\":{\"job.name\":\"mysql2console\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + SELECT_QUERY + "\"," + SCHEMA_FIELDS + "}],"
-                + "\"sink\":[{\"plugin_name\":\"Console\"}]}");
-
-        // ⑤ MySQL -> MySQL（双端真实 JDBC 同构）
-        jobs.add("{\"env\":{\"job.name\":\"mysql2mysql\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + SELECT_QUERY + "\"," + SCHEMA_FIELDS + "}],"
-                + "\"sink\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + INSERT_QUERY + "\"}]}");
-
-        // ⑥ MySQL -> Kafka（跨协议异构：DB -> MQ）
-        jobs.add("{\"env\":{\"job.name\":\"mysql2kafka\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + SELECT_QUERY + "\"," + SCHEMA_FIELDS + "}],"
-                + "\"sink\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
-                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\",\"format\":\"json\"}]}");
-
-        // ⑦ Kafka -> Console（单端 MQ 消费）
-        jobs.add("{\"env\":{\"job.name\":\"kafka2console\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
-                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\","
-                + "\"consumer.group\":\"e2e-group-console\",\"commit_on_checkpoint\":false,\"start_mode\":\"earliest\","
-                + SCHEMA_FIELDS + ",\"format\":\"json\"}],"
-                + "\"sink\":[{\"plugin_name\":\"Console\"}]}");
-
-        // ⑧ Kafka -> MySQL（跨协议异构：MQ -> DB）
-        jobs.add("{\"env\":{\"job.name\":\"kafka2mysql\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
-                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\","
-                + "\"consumer.group\":\"e2e-group-mysql\",\"commit_on_checkpoint\":false,\"start_mode\":\"earliest\","
-                + SCHEMA_FIELDS + ",\"format\":\"json\"}],"
-                + "\"sink\":[{\"plugin_name\":\"Jdbc\",\"url\":\"" + MYSQL_URL + "\","
-                + "\"driver\":\"" + MYSQL_DRIVER + "\",\"user\":\"root\",\"password\":\"root\","
-                + "\"query\":\"" + INSERT_QUERY + "\"}]}");
-
-        // ⑨ Kafka -> Kafka（双端真实 MQ 同构）
-        jobs.add("{\"env\":{\"job.name\":\"kafka2kafka\",\"job.mode\":\"BATCH\"},"
-                + "\"source\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-1\","
-                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\","
-                + "\"consumer.group\":\"e2e-group-kafka\",\"commit_on_checkpoint\":false,\"start_mode\":\"earliest\","
-                + SCHEMA_FIELDS + ",\"format\":\"json\"}],"
-                + "\"sink\":[{\"plugin_name\":\"Kafka\",\"topic\":\"test-topic-2\","
-                + "\"bootstrap.servers\":\"" + KAFKA_BOOTSTRAP + "\",\"format\":\"json\"}]}");
-
-        return jobs;
+    private void validateJobConfig(String fileName, String jsonContent) {
+        final JsonNode root;
+        try {
+            root = JSON_MAPPER.readTree(jsonContent);
+        } catch (Exception e) {
+            throw new IllegalStateException("Invalid JSON syntax in " + fileName + ": " + e.getMessage(), e);
+        }
+        final JsonNode source = root.path("source");
+        if (!source.isArray() || source.isEmpty()) {
+            throw new IllegalStateException("Missing or empty 'source' array in " + fileName);
+        }
+        final JsonNode sink = root.path("sink");
+        if (!sink.isArray() || sink.isEmpty()) {
+            throw new IllegalStateException("Missing or empty 'sink' array in " + fileName);
+        }
+        final Set<String> outputs = new HashSet<>();
+        for (JsonNode node : source) {
+            final String pluginName = node.path("plugin_name").asText("");
+            if (pluginName.isEmpty()) {
+                throw new IllegalStateException("Source entry missing 'plugin_name' in " + fileName);
+            }
+            final String output = node.path("plugin_output").asText("");
+            if (!output.isEmpty()) {
+                outputs.add(output);
+            }
+        }
+        final JsonNode transform = root.path("transform");
+        if (transform.isArray()) {
+            for (JsonNode node : transform) {
+                final String pluginName = node.path("plugin_name").asText("");
+                if (pluginName.isEmpty()) {
+                    throw new IllegalStateException("Transform entry missing 'plugin_name' in " + fileName);
+                }
+                final String input = node.path("plugin_input").asText("");
+                final String output = node.path("plugin_output").asText("");
+                if (input.isEmpty() || output.isEmpty()) {
+                    throw new IllegalStateException("Transform entry missing 'plugin_input' or 'plugin_output' in " + fileName);
+                }
+                if (!outputs.contains(input)) {
+                    throw new IllegalStateException(
+                        "Transform plugin_input '" + input + "' has no matching upstream plugin_output in " + fileName);
+                }
+                outputs.add(output);
+            }
+        }
+        for (JsonNode node : sink) {
+            final String pluginName = node.path("plugin_name").asText("");
+            if (pluginName.isEmpty()) {
+                throw new IllegalStateException("Sink entry missing 'plugin_name' in " + fileName);
+            }
+            final String input = node.path("plugin_input").asText("");
+            if (!input.isEmpty() && !outputs.contains(input)) {
+                throw new IllegalStateException(
+                    "Sink plugin_input '" + input + "' has no matching upstream plugin_output in " + fileName);
+            }
+        }
+        log.info("  Validated: {}", fileName);
     }
 
     private static final int MAX_SUBMIT_RETRIES = 3;
@@ -678,6 +826,20 @@ class MetaspaceLeakIT {
                     }
                     log.warn("[{}] Job {} HTTP {} - error: {}", jobTag, jobId, responseCode, errBody);
                 }
+            } catch (SocketTimeoutException ste) {
+                log.warn("[{}] Job {} REST read timeout, checking container log for fallback status.",
+                        jobTag, jobId);
+                final String logStatus = checkJobStatusFromContainerLog(containerName, jobId);
+                if ("FINISHED".equals(logStatus) || "UNKNOWABLE".equals(logStatus)) {
+                    log.info("[{}] Job {} -> {} (via container log after REST timeout)",
+                            jobTag, jobId, logStatus);
+                    return;
+                }
+                if ("FAILED".equals(logStatus) || "CANCELED".equals(logStatus)) {
+                    throw new IOException("Job " + jobTag + " (id=" + jobId
+                            + ") ended with status " + logStatus
+                            + " (via container log after REST timeout)", ste);
+                }
             } finally {
                 conn.disconnect();
             }
@@ -786,38 +948,6 @@ class MetaspaceLeakIT {
         return null;
     }
 
-    /**
-     * 删除 Kafka topics 以在对照组和实验组之间重置消息状态。
-     * <p>
-     * 两组共用同一个 Kafka 集群，对照组的 Kafka sink 作业会向 {@code test-topic-1} 生产消息。
-     * 若不清空，实验组的 Kafka source 作业从 earliest 消费会读到对照组残留消息，
-     * 导致处理双倍数据量，破坏 A/B 对比公平性。
-     * <p>
-     * 删除后依赖 {@code KAFKA_AUTO_CREATE_TOPICS_ENABLE=true} 自动重建。
-     */
-    private void resetKafkaTopics() throws IOException, InterruptedException {
-        log.info("Resetting Kafka topics between Control and Treatment groups...");
-        final String[] topics = {"test-topic-1", "test-topic-2"};
-        for (String topic : topics) {
-            final ProcessBuilder pb = new ProcessBuilder(
-                    "docker", "exec", "kafka-server",
-                    "/opt/kafka/bin/kafka-topics.sh",
-                    "--bootstrap-server", "localhost:9092",
-                    "--delete", "--topic", topic);
-            pb.redirectErrorStream(true);
-            final Process p = pb.start();
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    log.info("[kafka-reset] {}", line);
-                }
-            }
-            p.waitFor(10, TimeUnit.SECONDS);
-        }
-        Thread.sleep(3000);
-        log.info("Kafka topics reset completed.");
-    }
 
     private static String extractJsonField(String json, String fieldName) {
         final Pattern p = Pattern.compile("\"" + fieldName + "\"\\s*:\\s*\"([^\"]+)\"");

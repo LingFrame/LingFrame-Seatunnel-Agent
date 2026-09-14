@@ -68,6 +68,7 @@ services:
       - ../lingframe-agent-dist/target/lingframe-seatunnel-agent.jar:/opt/seatunnel/lib/lingframe-seatunnel-agent.jar
       - ./target/connectors/seatunnel:/opt/seatunnel/connectors/seatunnel
       - ./target/drivers/mysql-connector-java.jar:/opt/seatunnel/lib/mysql-connector-java.jar
+      - ./src/test/resources/file-input:/opt/seatunnel/e2e-input:ro
     command: >
       sh -c "
         export JAVA_OPTS=\"$${JAVA_OPTS} -XX:+UnlockDiagnosticVMOptions -Dlog4j2.configurationFile=/opt/seatunnel/config/log4j2.xml -javaagent:/opt/seatunnel/lib/lingframe-seatunnel-agent.jar\";
@@ -100,6 +101,7 @@ services:
       - ./src/test/resources/log4j2.properties:/opt/seatunnel/config/log4j2.properties
       - ./target/connectors/seatunnel:/opt/seatunnel/connectors/seatunnel
       - ./target/drivers/mysql-connector-java.jar:/opt/seatunnel/lib/mysql-connector-java.jar
+      - ./src/test/resources/file-input:/opt/seatunnel/e2e-input:ro
     command: >
       sh -c "
         export JAVA_OPTS=\"$${JAVA_OPTS} -XX:+UnlockDiagnosticVMOptions -Dlog4j2.configurationFile=/opt/seatunnel/config/log4j2.xml\";

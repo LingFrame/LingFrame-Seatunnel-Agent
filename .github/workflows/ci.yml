@@ -64,8 +64,11 @@ jobs:
           cache: 'maven'
 
 
-      - name: Build Agent and E2E Artifacts
-        run: mvn -B clean install -DskipTests
+      - name: Build Agent and Pull Docker Images in Parallel
+        run: |
+          (cd lingframe-agent-e2e && docker compose pull) &
+          mvn -B clean install -DskipTests
+          wait
 
       - name: Run E2E Tests
         run: |

@@ -7,7 +7,7 @@
     <parent>
         <groupId>cn.lingframe.agent</groupId>
         <artifactId>lingframe-seatunnel-agent</artifactId>
-        <version>0.1.0</version>
+        <version>0.2.0</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -21,7 +21,7 @@
         <seatunnel.version>2.3.13</seatunnel.version>
         <jacoco.skip>true</jacoco.skip>
         <lingframe.test.serial.rounds>2</lingframe.test.serial.rounds>
-        <lingframe.test.concurrent.rounds>3</lingframe.test.concurrent.rounds>
+        <lingframe.test.concurrent.rounds>5</lingframe.test.concurrent.rounds>
     </properties>
 
     <dependencies>
@@ -84,6 +84,12 @@
             <artifactId>assertj-core</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.15.3</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -127,6 +133,20 @@
                                     <version>${seatunnel.version}</version>
                                     <outputDirectory>${project.build.directory}/connectors/seatunnel</outputDirectory>
                                     <destFileName>connector-kafka.jar</destFileName>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.apache.seatunnel</groupId>
+                                    <artifactId>connector-file-local</artifactId>
+                                    <version>${seatunnel.version}</version>
+                                    <outputDirectory>${project.build.directory}/connectors/seatunnel</outputDirectory>
+                                    <destFileName>connector-file-local.jar</destFileName>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.apache.seatunnel</groupId>
+                                    <artifactId>seatunnel-transforms-v2</artifactId>
+                                    <version>${seatunnel.version}</version>
+                                    <outputDirectory>${project.build.directory}/connectors/seatunnel</outputDirectory>
+                                    <destFileName>seatunnel-transforms-v2.jar</destFileName>
                                 </artifactItem>
                                 <artifactItem>
                                     <groupId>com.mysql</groupId>
