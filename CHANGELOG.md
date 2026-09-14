@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-14
+
+### Added
+
+- **E2E 作业矩阵扩展至 14 组**：新增 file-to-file、file-to-mysql（SQL transform）、mysql-to-file（SQL transform）、mysql-to-kafka（SQL transform）四组链路，覆盖 LocalFile 连接器与 SQL transform 多插件 CL 共存场景
+- **作业矩阵外置化**：14 组作业提取为标准 SeaTunnel JSON 配置文件，置于 `src/test/resources/e2e-jobs/` 目录。增删 JSON 文件即可调整测试矩阵，无需改代码。支持 `-Dlingframe.test.job.dir` 指定外部目录
+- **作业配置校验**：`validateJobConfig` 方法在加载时校验 JSON 结构完整性与链路连通性（source.plugin_output → transform.plugin_input → sink.plugin_input），断链 fail-fast
+- **并发轮次提升至 5 轮**：`lingframe.test.concurrent.rounds` 从 3 调至 5，每组 98 作业（2 轮串行×14 + 5 轮并发×14），两组共 196 作业次
+
+### Changed
+
+- **CI 流水线并行优化**（E2E 耗时 27m8s → 21m）：
+  - Docker 镜像预拉取与 Maven build 并行
+  - Native-Control / Agent-Treatment benchmark 并行执行（Kafka topic 按组别前缀隔离）
+  - jmap clstats 两组并行 dump
+  - 作业 FINISHED 验证从串行改为 2 线程并发（`waitForJobFinished` 超时 240s）
+  - 基线采样 `captureClassCounts` 与 `captureClassLoaderStats` 并行
+  - 串行提交间隔 1000ms → 200ms
+  - 引擎异步清理等待 30s → 10s
+  - 并发提交后加 60s 等待，让 SeaTunnel 先完成一批作业再开始验证
+  - REST readTimeout 30s → 10s，快速失败走容器日志 fallback
+- **Metaspace 审计阈值动态化**：定值 15 MB 阈值改为 `(7 + 0.25 × N) × 1.5 MB` 动态阈值，趋势判定（Round 2 delta / Round 1 delta < 0.2）输出显眼 WARN，终极判定锚点为 ClassLoaderCount=0
+
+### Fixed
+
+- **SeaTunnel REST 端点并发压力**：4 线程并发验证压垮 REST 端点致 timeout，降至 2 线程并增加 60s 等待缓冲
+- **pom.xml systemPropertyVariables 覆盖代码默认值**：`concurrentRounds` 代码默认值改为 5 但 pom.xml 硬编码 3 覆盖，修正 pom.xml 属性值
+
 ## [0.1.0] - 2026-09-10
 
 ### Added
