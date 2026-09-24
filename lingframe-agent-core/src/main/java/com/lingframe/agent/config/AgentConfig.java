@@ -48,8 +48,12 @@ public final class AgentConfig {
     private static final long PER_JOB_REAP_INTERVAL_MS_DEFAULT = 300_000L;
 
     private final boolean governanceEnabled;
+    /** 弹性治理总开关，默认关闭；关闭不影响 ClassLoader 清理。 */
+    private final boolean resilienceEnabled;
     private final boolean circuitBreakerEnabled;
     private final boolean rateLimiterEnabled;
+    private final boolean bulkheadEnabled;
+    private final boolean timeoutEnabled;
     private final boolean grayRoutingEnabled;
     private final boolean permissionEnabled;
     private final boolean devMode;
@@ -97,9 +101,10 @@ public final class AgentConfig {
                 int rateLimitPerSecond, int circuitBreakerFailureRateThreshold,
                 int circuitBreakerSlidingWindowSize, int defaultTimeoutMs,
                 boolean failClosed) {
-        this(governanceEnabled, circuitBreakerEnabled, rateLimiterEnabled, grayRoutingEnabled,
-                permissionEnabled, devMode, taskExecutionAdviceEnabled, rateLimitPerSecond,
-                circuitBreakerFailureRateThreshold, circuitBreakerSlidingWindowSize,
+        this(governanceEnabled, true, circuitBreakerEnabled, rateLimiterEnabled,
+                false, false, grayRoutingEnabled, permissionEnabled, devMode,
+                taskExecutionAdviceEnabled, rateLimitPerSecond, circuitBreakerFailureRateThreshold,
+                circuitBreakerSlidingWindowSize,
                 MINIMUM_CALLS_DEFAULT, defaultTimeoutMs,
                 failClosed,
                 true, PER_JOB_MAX_TRACKED_JOBS_DEFAULT, PER_JOB_IDLE_TTL_MS_DEFAULT, PER_JOB_REAP_INTERVAL_MS_DEFAULT,
@@ -119,9 +124,10 @@ public final class AgentConfig {
                 boolean perJobGovernanceEnabled, int perJobMaxTrackedJobs,
                 long perJobIdleTtlMs, long perJobReapIntervalMs,
                 String traceLogLevel, String auditLogLevel, int logSampleRate, boolean timingEnabled) {
-        this(governanceEnabled, circuitBreakerEnabled, rateLimiterEnabled, grayRoutingEnabled,
-                permissionEnabled, devMode, taskExecutionAdviceEnabled, rateLimitPerSecond,
-                circuitBreakerFailureRateThreshold, circuitBreakerSlidingWindowSize,
+        this(governanceEnabled, true, circuitBreakerEnabled, rateLimiterEnabled,
+                false, false, grayRoutingEnabled, permissionEnabled, devMode,
+                taskExecutionAdviceEnabled, rateLimitPerSecond, circuitBreakerFailureRateThreshold,
+                circuitBreakerSlidingWindowSize,
                 circuitBreakerMinimumNumberOfCalls, defaultTimeoutMs,
                 failClosed,
                 perJobGovernanceEnabled, perJobMaxTrackedJobs,
@@ -145,9 +151,35 @@ public final class AgentConfig {
                 boolean classifierEnabled,
                 List<String> downstreamReadableFailuresPatterns,
                 List<String> businessExceptionsPatterns) {
+        this(governanceEnabled, true, circuitBreakerEnabled, rateLimiterEnabled,
+                false, false, grayRoutingEnabled, permissionEnabled, devMode,
+                taskExecutionAdviceEnabled, rateLimitPerSecond, circuitBreakerFailureRateThreshold,
+                circuitBreakerSlidingWindowSize, circuitBreakerMinimumNumberOfCalls, defaultTimeoutMs,
+                failClosed, perJobGovernanceEnabled, perJobMaxTrackedJobs, perJobIdleTtlMs,
+                perJobReapIntervalMs, traceLogLevel, auditLogLevel, logSampleRate, timingEnabled,
+                classifierEnabled, downstreamReadableFailuresPatterns, businessExceptionsPatterns);
+    }
+
+    AgentConfig(boolean governanceEnabled, boolean resilienceEnabled,
+                boolean circuitBreakerEnabled, boolean rateLimiterEnabled,
+                boolean bulkheadEnabled, boolean timeoutEnabled,
+                boolean grayRoutingEnabled, boolean permissionEnabled, boolean devMode,
+                boolean taskExecutionAdviceEnabled,
+                int rateLimitPerSecond, int circuitBreakerFailureRateThreshold,
+                int circuitBreakerSlidingWindowSize, int circuitBreakerMinimumNumberOfCalls,
+                int defaultTimeoutMs, boolean failClosed,
+                boolean perJobGovernanceEnabled, int perJobMaxTrackedJobs,
+                long perJobIdleTtlMs, long perJobReapIntervalMs,
+                String traceLogLevel, String auditLogLevel, int logSampleRate, boolean timingEnabled,
+                boolean classifierEnabled,
+                List<String> downstreamReadableFailuresPatterns,
+                List<String> businessExceptionsPatterns) {
         this.governanceEnabled = governanceEnabled;
+        this.resilienceEnabled = resilienceEnabled;
         this.circuitBreakerEnabled = circuitBreakerEnabled;
         this.rateLimiterEnabled = rateLimiterEnabled;
+        this.bulkheadEnabled = bulkheadEnabled;
+        this.timeoutEnabled = timeoutEnabled;
         this.grayRoutingEnabled = grayRoutingEnabled;
         this.permissionEnabled = permissionEnabled;
         this.devMode = devMode;
@@ -236,8 +268,11 @@ public final class AgentConfig {
 
         return new AgentConfig(
                 toBoolean(governance.getOrDefault("enabled", true)),
+                toBoolean(resilience.getOrDefault("enabled", false)),
                 toBoolean(resilience.getOrDefault("circuit-breaker-enabled", false)),
                 toBoolean(resilience.getOrDefault("rate-limiter-enabled", false)),
+                toBoolean(resilience.getOrDefault("bulkhead-enabled", false)),
+                toBoolean(resilience.getOrDefault("timeout-enabled", false)),
                 toBoolean(routing.getOrDefault("gray-routing-enabled", false)),
                 toBoolean(security.getOrDefault("permission-enabled", false)),
                 toBoolean(governance.getOrDefault("dev-mode", false)),
@@ -305,18 +340,25 @@ public final class AgentConfig {
     }
 
     /**
-     * 内嵌默认配置：**默认不开启批次级治理**（仅 ClassLoader 深度清理 + TCCL 防御，零治理损耗）。
+     * 内嵌默认配置：弹性治理默认关闭，仅保留 ClassLoader 深度清理。
      * <p>
-     * 熔断/限流/灰度/权限与批次切点全部默认 {@code false}——需要弹性治理的部署须在 YAML 中
-     * 显式开启（任一治理特性开启后，批次切点经 {@link #isEffectiveTaskExecutionAdviceEnabled()}
-     * 自动联动织入，无需再单独开切点）。
+     * 弹性总开关及熔断、限流、舱壁、超时组件可以在 YAML 中显式开启，关闭弹性治理不影响卸载清理。
      */
     private static AgentConfig defaults() {
-        return new AgentConfig(true, false, false, false, false, false, false, 100, 50, 20, 3000, false);
+        return new AgentConfig(true, false, false, false, false, false,
+                false, false, false, false, 100, 50, 20, MINIMUM_CALLS_DEFAULT,
+                3000, false, true, PER_JOB_MAX_TRACKED_JOBS_DEFAULT,
+                PER_JOB_IDLE_TTL_MS_DEFAULT, PER_JOB_REAP_INTERVAL_MS_DEFAULT,
+                "INFO", "INFO", 1, false, true,
+                Collections.emptyList(), Collections.emptyList());
     }
 
     public boolean isGovernanceEnabled() {
         return governanceEnabled;
+    }
+
+    public boolean isResilienceEnabled() {
+        return resilienceEnabled;
     }
 
     public boolean isCircuitBreakerEnabled() {
@@ -325,6 +367,14 @@ public final class AgentConfig {
 
     public boolean isRateLimiterEnabled() {
         return rateLimiterEnabled;
+    }
+
+    public boolean isBulkheadEnabled() {
+        return bulkheadEnabled;
+    }
+
+    public boolean isTimeoutEnabled() {
+        return timeoutEnabled;
     }
 
     public boolean isGrayRoutingEnabled() {
@@ -346,24 +396,26 @@ public final class AgentConfig {
     /**
      * 批次切点（TaskExecutionAdvice）实际是否织入（有效开关）。
      * <p>
-     * 熔断 / 限流 / 灰度 / 权限均为**显式 opt-in**（默认 {@code false}，默认配置 = 纯 ClassLoader 清理，
-     * 不织入批次切点）。当用户**显式开启**任一治理特性时，批次切点必须随之织入——
+     * 熔断 / 限流 / 舱壁 / 超时受弹性总开关控制，灰度与权限治理不受该开关影响；
+     * 关闭总开关后若没有其他治理特性则只保留 ClassLoader 清理，不织入批次切点。当用户开启任一治理特性时，批次切点必须随之织入——
      * 否则 {@code beforeTaskCall}/{@code afterTaskCall} 永不调用、该特性静默失效
      * （「伪开启」：YAML 写了 circuit-breaker-enabled: true，却因批次切点未织入而零弹性）。
-     * 故有效开关 = 显式 {@code task-execution-advice-enabled} 或任一治理特性启用。
+     * 故有效开关 = 显式 {@code task-execution-advice-enabled}、灰度/权限治理启用，或弹性总开关开启且任一弹性组件启用。
      * <p>
      * premain 的织入判定与可观测性摘要均应使用本方法而非 {@link #isTaskExecutionAdviceEnabled()}，
-     * 以保证「显式开启了治理特性就真的生效」；默认全关时本方法返回 {@code false}（不织入）。
+     * 以保证「显式开启了治理特性就真的生效」；关闭弹性总开关且没有其他治理特性时本方法返回 {@code false}。
      */
     public boolean isEffectiveTaskExecutionAdviceEnabled() {
         if (!governanceEnabled) {
             return false;
         }
         return taskExecutionAdviceEnabled
-                || circuitBreakerEnabled
-                || rateLimiterEnabled
                 || grayRoutingEnabled
-                || permissionEnabled;
+                || permissionEnabled
+                || (resilienceEnabled && (circuitBreakerEnabled
+                || rateLimiterEnabled
+                || bulkheadEnabled
+                || timeoutEnabled));
     }
 
     public boolean isFailClosed() {

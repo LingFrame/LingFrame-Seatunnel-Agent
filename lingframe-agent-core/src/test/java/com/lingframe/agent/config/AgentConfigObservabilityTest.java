@@ -75,4 +75,15 @@ public class AgentConfigObservabilityTest {
                 100, 50, 20, 3000, false);
         assertFalse(c.isEffectiveTaskExecutionAdviceEnabled());
     }
+
+    @Test
+    public void resilienceGlobalSwitchDisablesElasticAdviceOnly() {
+        final AgentConfig c = TestAgentConfigs.createWithResilienceEnabled(
+                false, true, true, true, false, false, false);
+        assertFalse(c.isEffectiveTaskExecutionAdviceEnabled());
+
+        final AgentConfig permissionConfig = TestAgentConfigs.createWithResilienceEnabled(
+                false, true, false, false, false, true, false);
+        assertTrue(permissionConfig.isEffectiveTaskExecutionAdviceEnabled());
+    }
 }

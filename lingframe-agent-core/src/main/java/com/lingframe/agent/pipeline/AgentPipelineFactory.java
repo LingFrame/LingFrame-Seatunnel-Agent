@@ -85,8 +85,7 @@ public final class AgentPipelineFactory {
         final boolean devMode = agentConfig != null && agentConfig.isDevMode();
         final boolean permissionEnabled = agentConfig != null && agentConfig.isPermissionEnabled();
         final boolean resilienceEnabled = agentConfig == null
-                || agentConfig.isCircuitBreakerEnabled()
-                || agentConfig.isRateLimiterEnabled();
+                || (agentConfig.isGovernanceEnabled() && agentConfig.isResilienceEnabled());
         final boolean grayRoutingEnabled = agentConfig != null && agentConfig.isGrayRoutingEnabled();
 
         // 权限关闭时强制 devMode=true，使 PermissionGovernanceFilter 未声明权限即放行
@@ -147,6 +146,7 @@ public final class AgentPipelineFactory {
                 .build());
 
         final InvocationPipelineEngine pipelineEngine = new InvocationPipelineEngine(filterRegistry);
+        pipelineEngine.setResilienceEnabled(resilienceEnabled);
 
         final DefaultLingResourceManager resourceManager =
                 new DefaultLingResourceManager(lingRepository, eventBus, methodCache);
@@ -215,7 +215,12 @@ public final class AgentPipelineFactory {
         try {
             final LingRuntimeConfig.LingRuntimeConfigBuilder configBuilder = LingRuntimeConfig.builder()
                     .maxHistorySnapshots(1)
-                    .bulkheadMaxConcurrent(10);
+                    .bulkheadMaxConcurrent(10)
+                    .resilienceEnabled(agentConfig == null || agentConfig.isResilienceEnabled())
+                    .circuitBreakerEnabled(agentConfig == null || agentConfig.isCircuitBreakerEnabled())
+                    .rateLimiterEnabled(agentConfig == null || agentConfig.isRateLimiterEnabled())
+                    .bulkheadEnabled(agentConfig == null || agentConfig.isBulkheadEnabled())
+                    .timeoutEnabled(agentConfig == null || agentConfig.isTimeoutEnabled());
 
             if (agentConfig != null) {
                 configBuilder

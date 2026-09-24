@@ -437,6 +437,22 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
         }
     }
 
+    /**
+     * 切换 Core 弹性治理总开关。
+     * ClassLoader 清理、物理释放和卸载钩子不受影响。
+     *
+     * @param enabled true=恢复弹性治理，false=绕过弹性治理
+     */
+    public void setResilienceEnabled(boolean enabled) {
+        if (pipelineEngine != null) {
+            pipelineEngine.setResilienceEnabled(enabled);
+        }
+    }
+
+    public boolean isResilienceEnabled() {
+        return pipelineEngine != null && pipelineEngine.isResilienceEnabled();
+    }
+
     private boolean isTimeoutError(Throwable error) {
         Throwable t = error;
         while (t != null) {

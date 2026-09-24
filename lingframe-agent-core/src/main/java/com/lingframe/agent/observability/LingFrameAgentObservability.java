@@ -135,6 +135,7 @@ public class LingFrameAgentObservability implements LingFrameAgentObservabilityM
         }
         return new StringBuilder(256)
                 .append("governance=").append(config.isGovernanceEnabled())
+                .append(", resilience=").append(isResilienceEnabled())
                 .append(", taskAdvice(eff)=").append(config.isEffectiveTaskExecutionAdviceEnabled())
                 .append(", devMode=").append(config.isDevMode())
                 .append(", traceLevel=").append(config.getTraceLogLevel())
@@ -151,5 +152,17 @@ public class LingFrameAgentObservability implements LingFrameAgentObservabilityM
             return;
         }
         adapter.resetHealthMetrics();
+    }
+
+    @Override
+    public void setResilienceEnabled(boolean enabled) {
+        if (adapter != null) {
+            adapter.setResilienceEnabled(enabled);
+        }
+    }
+
+    @Override
+    public boolean isResilienceEnabled() {
+        return adapter != null && adapter.isResilienceEnabled();
     }
 }

@@ -19,16 +19,19 @@ class AgentConfigTest {
     class DefaultConfig {
 
         @Test
-        @DisplayName("无配置文件时应返回默认值（默认不开启批次级治理：弹性特性与切点全关）")
+        @DisplayName("无配置文件时应返回默认值（弹性治理默认关闭）")
         void shouldReturnDefaultsWhenNoConfig() {
             final AgentConfig config = AgentConfig.load(null);
-            // 总开关开启（Agent 激活、ClassLoader 清理/TCCL 防御生效），但默认不装配任何治理特性
+            // Agent 激活、ClassLoader 清理/TCCL 防御默认开启，弹性治理默认关闭
             assertThat(config.isGovernanceEnabled()).isTrue();
+            assertThat(config.isResilienceEnabled()).isFalse();
             assertThat(config.isCircuitBreakerEnabled()).isFalse();
             assertThat(config.isRateLimiterEnabled()).isFalse();
+            assertThat(config.isBulkheadEnabled()).isFalse();
+            assertThat(config.isTimeoutEnabled()).isFalse();
             assertThat(config.isGrayRoutingEnabled()).isFalse();
             assertThat(config.isPermissionEnabled()).isFalse();
-            // 默认无治理特性 → 批次切点有效开关为 false（不织入 call()，纯 ClassLoader 清理）
+            // 默认无弹性治理特性，不织入批次切点
             assertThat(config.isTaskExecutionAdviceEnabled()).isFalse();
             assertThat(config.isEffectiveTaskExecutionAdviceEnabled()).isFalse();
         }
@@ -59,8 +62,11 @@ class AgentConfigTest {
                     "governance:\n" +
                     "  enabled: true\n" +
                     "  resilience:\n" +
+                    "    enabled: false\n" +
                     "    circuit-breaker-enabled: false\n" +
                     "    rate-limiter-enabled: true\n" +
+                    "    bulkhead-enabled: false\n" +
+                    "    timeout-enabled: false\n" +
                     "  routing:\n" +
                     "    gray-routing-enabled: true\n" +
                     "  security:\n" +
@@ -69,8 +75,11 @@ class AgentConfigTest {
 
             final AgentConfig config = AgentConfig.load(configPath.toString());
             assertThat(config.isGovernanceEnabled()).isTrue();
+            assertThat(config.isResilienceEnabled()).isFalse();
             assertThat(config.isCircuitBreakerEnabled()).isFalse();
             assertThat(config.isRateLimiterEnabled()).isTrue();
+            assertThat(config.isBulkheadEnabled()).isFalse();
+            assertThat(config.isTimeoutEnabled()).isFalse();
             assertThat(config.isGrayRoutingEnabled()).isTrue();
             assertThat(config.isPermissionEnabled()).isTrue();
         }

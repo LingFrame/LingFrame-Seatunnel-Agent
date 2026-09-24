@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 适用 | lingframe-seatunnel-agent 及 lingframe-core 0.4.5 及以上 |
+| 适用 | lingframe-seatunnel-agent 及 lingframe-core 0.4.6 及以上 |
 | 读者 | 平台运维 / SRE / 集群负责人 |
 
 ---
@@ -70,8 +70,11 @@ governance:
   per-job-idle-ttl-ms: 1800000           # 空闲回收 TTL（30min），Reaper 按周期扫描
   per-job-reap-interval-ms: 300000       # Reaper 节流间隔（5min）
   resilience:
-    circuit-breaker-enabled: true        # 熔断开关（opt-in）
-    rate-limiter-enabled: true           # 限流开关（opt-in）
+    enabled: false                       # 弹性治理总开关（默认关闭）
+    circuit-breaker-enabled: false       # 熔断开关（显式开启）
+    rate-limiter-enabled: false          # 限流开关（显式开启）
+    bulkhead-enabled: false              # 舱壁开关（显式开启）
+    timeout-enabled: false               # 超时开关（显式开启）
     fail-closed: false                   # 硬拒绝门控：false=日志+放行；true=熔断/舱满硬拒
     classifier-enabled: true             # 熔断失败判定分类器：true=两层契约化分类；false=回退启发式
     downstream-readable-failures-patterns: []   # 下游可用性失败显式 patterns（正则 match FQCN/message）

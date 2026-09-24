@@ -64,4 +64,11 @@ public interface LingFrameAgentObservabilityMBean {
      * JMX 调用：{@code resetCircuitBreaker()}。
      */
     void resetCircuitBreaker();
+
+    /**
+     * 一键关闭或恢复弹性治理。ClassLoader 清理始终保留。
+     */
+    void setResilienceEnabled(boolean enabled);
+
+    boolean isResilienceEnabled();
 }
