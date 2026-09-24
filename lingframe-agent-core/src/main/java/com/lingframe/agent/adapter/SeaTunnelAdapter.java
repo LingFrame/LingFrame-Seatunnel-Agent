@@ -24,6 +24,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Locale;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -70,20 +71,14 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
     private final boolean failClosed;
     /** 熔断失败判定契约化分类器：裁决异常是否代表下游可用性失败、可否喂 onError。 */
     private final FailureClassifier failureClassifier;
-    /** 跨方法传递 InvocationContext，beforeTaskCall 设置，afterTaskCall 回收 */
-    private final ThreadLocal<InvocationContext> pipelineContext = new ThreadLocal<>();
-    /** 批次调用开始时间，用于计算耗时回灌 LingHealthMetrics */
-    private final ThreadLocal<Long> callStartTime = ThreadLocal.withInitial(() -> 0L);
+    /** 当前线程的批次治理令牌；before 创建，after 结算并清理。 */
+    private final ThreadLocal<GovernanceCallToken> callToken = new ThreadLocal<>();
     /** 治理拒绝退避控制器（令牌间隔 + 抖动 + 每线程每秒退避预算） */
     private final BackoffController backoffController = new BackoffController();
     /** 作业 ID 解析器（注入；null 或返回 NO_JOB 时回退共享灵元 seatunnel）。 */
     private volatile JobIdExtractor jobIdExtractor;
     /** 作业级虚拟灵元注册表（注入；null 时退化为共享灵元，与引擎级治理行为一致）。 */
     private volatile JobLingRegistry jobLingRegistry;
-    /** 本次批次解析出的目标灵元 ID（beforeTaskCall 设置，afterTaskCall 读取用于回灌同一作业灵元）。 */
-    private final ThreadLocal<String> currentLingId = new ThreadLocal<>();
-    /** 本次批次是否已经完成结果结算，防止异常路径或重复回调重复喂指标。 */
-    private final ThreadLocal<Boolean> outcomeSettled = new ThreadLocal<>();
     /** Hazelcast 配置中心下一次允许重试初始化时间戳（毫秒），用于失败重试节流 */
     private final AtomicLong nextConfigCenterRetryAt = new AtomicLong();
 
@@ -95,6 +90,22 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
     private final PipelineEventSubscriber pipelineEventSubscriber = new PipelineEventSubscriber();
     /** 治理拒绝告警窗口限频器：熔断/限流风暴下避免 Worker 调度循环产生海量告警日志刷屏 */
     private final TraceLogThrottle rejectionThrottle = new TraceLogThrottle();
+
+    /**
+     * 一次 SeaTunnel 批次的治理上下文。字段在创建后不可变，结算状态单独原子化，
+     * 保证异常路径和重复 after 回调不会重复喂入指标。
+     */
+    private static final class GovernanceCallToken {
+        private final String lingId;
+        private final long startNanos;
+        private final AtomicBoolean settled = new AtomicBoolean();
+        private InvocationContext context;
+
+        private GovernanceCallToken(String lingId, long startNanos) {
+            this.lingId = lingId;
+            this.startNanos = startNanos;
+        }
+    }
 
     public SeaTunnelAdapter(AgentConfig config,
                            InvocationPipelineEngine pipelineEngine,
@@ -161,14 +172,14 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
     public void beforeTaskCall(Object task) {
         final long hookT0 = config.isTimingEnabled() ? System.nanoTime() : 0L;
         try {
-            // 上一批次的 after 回调已结束；在新批次开始时重置幂等状态。
-            outcomeSettled.remove();
+            // 线程复用时先丢弃异常遗留令牌，避免把上一批次结果结算到当前批次。
+            discardCallToken();
             ensureConfigCenterInit();
             pipelineEventSubscriber.subscribeIfNeeded(eventBus, config);
-            callStartTime.set(System.nanoTime());
             // 解析本次批次的目标灵元（作业级或共享）；供 invoke 与 afterTaskCall 回灌一致使用
             final String targetLingId = resolveTargetLingId(task);
-            currentLingId.set(targetLingId);
+            final GovernanceCallToken token = new GovernanceCallToken(targetLingId, System.nanoTime());
+            callToken.set(token);
 
             if (pipelineEngine == null) {
                 log.debug("Pipeline engine unavailable, skipping governance pre-check");
@@ -191,8 +202,7 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
                 ctx.execution().setMode(InvocationExecutionMode.GOVERN_ONLY);
 
                 pipelineEngine.invoke(ctx);
-                pipelineContext.set(ctx);
-                outcomeSettled.set(false);
+                token.context = ctx;
             } catch (LingInvocationException e) {
                 if (failClosed && isHardReject(e.getKind())) {
                     // 熔断名副其实：电路打开 / 舱壁打满时硬拒绝，使 call() 携带异常逃逸 → 引擎 Failover，
@@ -200,20 +210,18 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
                     if (ctx != null) {
                         ctx.recycle();
                     }
-                    currentLingId.remove();
+                    discardCallToken();
                     throw new GovernanceRejectException(e);
                 }
                 handleGovernanceRejection(e);
                 if (ctx != null) {
                     ctx.recycle();
                 }
-                outcomeSettled.remove();
             } catch (Throwable t) {
                 log.warn("Pipeline pre-governance failed, allowing passthrough: {}", t.getMessage());
                 if (ctx != null) {
                     ctx.recycle();
                 }
-                outcomeSettled.remove();
             }
         } finally {
             if (config.isTimingEnabled()) {
@@ -330,30 +338,30 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
         afterTaskCall(error);
     }
 
-    /** 兼容便捷入口：等价于 with-task 版本（task 仅用于作业级灵元解析，回灌已由 currentLingId 记录）。 */
+    /** 兼容便捷入口：等价于 with-task 版本（task 仅用于作业级灵元解析）。 */
     public void afterTaskCall(Throwable error) {
         final long hookT0 = config.isTimingEnabled() ? System.nanoTime() : 0L;
+        final GovernanceCallToken token = callToken.get();
         try {
-            if (!Boolean.TRUE.equals(outcomeSettled.get())) {
-                final Long startTime = callStartTime.get();
-                final long durationNanos = (startTime != null && startTime > 0L)
-                        ? (System.nanoTime() - startTime)
-                        : 0L;
+            if (token == null) {
+                log.debug("afterTaskCall ignored because no active beforeTaskCall token exists");
+                return;
+            }
+            if (token.settled.compareAndSet(false, true)) {
+                final long durationNanos = Math.max(0L, System.nanoTime() - token.startNanos);
                 final long costMs = durationNanos / 1_000_000;
-                final String lingId = currentLingId.get();
-                recordTaskMetrics(lingId, error, costMs, durationNanos);
-                outcomeSettled.set(true);
+                recordTaskMetrics(token.lingId, error, costMs, durationNanos);
             } else {
-                log.debug("Duplicate afterTaskCall ignored for lingId={}", currentLingId.get());
+                log.debug("Duplicate afterTaskCall ignored for lingId={}", token.lingId);
             }
         } finally {
-            final InvocationContext ctx = pipelineContext.get();
-            if (ctx != null) {
-                ctx.recycle();
+            if (token != null) {
+                if (token.context != null) {
+                    token.context.recycle();
+                    token.context = null;
+                }
+                callToken.remove();
             }
-            pipelineContext.remove();
-            callStartTime.remove();
-            currentLingId.remove();
             if (config.isTimingEnabled()) {
                 final long afterCost = System.nanoTime() - hookT0;
                 final Long beforeCost = beforeCostNanos.get();
@@ -459,6 +467,15 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
         if (pipelineEngine != null) {
             pipelineEngine.setResilienceEnabled(enabled);
         }
+    }
+
+    private void discardCallToken() {
+        final GovernanceCallToken previous = callToken.get();
+        if (previous != null && previous.context != null) {
+            previous.context.recycle();
+            previous.context = null;
+        }
+        callToken.remove();
     }
 
     public boolean isResilienceEnabled() {

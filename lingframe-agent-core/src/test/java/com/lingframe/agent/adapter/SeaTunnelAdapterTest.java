@@ -334,7 +334,7 @@ class SeaTunnelAdapterTest {
         }
 
         @Test
-        @DisplayName("未调用 beforeTaskCall 直接调用 afterTaskCall 应安全兜底且耗时不会纳秒溢出")
+        @DisplayName("未调用 beforeTaskCall 直接调用 afterTaskCall 应安全忽略")
         void shouldHandleAfterTaskCallSafelyWithoutBeforeTaskCall() {
             final AgentConfig config = TestAgentConfigs.create(true, true, true, false, false, false);
             final AgentGovernanceRuntime runtime = AgentPipelineFactory.create(config);
@@ -350,9 +350,9 @@ class SeaTunnelAdapterTest {
             adapter.afterTaskCall(null);
 
             final LingHealthMetrics metrics = runtime.getMetricsCollector().getOrCreate("seatunnel");
-            assertThat(metrics.getTotalRequests().sum()).isEqualTo(1L);
-            assertThat(metrics.getSuccessRequests().sum()).isEqualTo(1L);
-            assertThat(metrics.getMaxLatencyMs().get()).isEqualTo(0L);
+            assertThat(metrics.getTotalRequests().sum()).isZero();
+            assertThat(metrics.getSuccessRequests().sum()).isZero();
+            assertThat(metrics.getMaxLatencyMs().get()).isZero();
         }
 
         @Test
