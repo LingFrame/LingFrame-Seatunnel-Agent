@@ -184,11 +184,12 @@ public final class AgentConfig {
         this.permissionEnabled = permissionEnabled;
         this.devMode = devMode;
         this.taskExecutionAdviceEnabled = taskExecutionAdviceEnabled;
-        this.rateLimitPerSecond = rateLimitPerSecond;
-        this.circuitBreakerFailureRateThreshold = circuitBreakerFailureRateThreshold;
-        this.circuitBreakerSlidingWindowSize = circuitBreakerSlidingWindowSize;
-        this.circuitBreakerMinimumNumberOfCalls = circuitBreakerMinimumNumberOfCalls;
-        this.defaultTimeoutMs = defaultTimeoutMs;
+        this.rateLimitPerSecond = Math.max(0, rateLimitPerSecond);
+        this.circuitBreakerFailureRateThreshold = clampPercentage(circuitBreakerFailureRateThreshold);
+        this.circuitBreakerSlidingWindowSize = Math.max(1, circuitBreakerSlidingWindowSize);
+        this.circuitBreakerMinimumNumberOfCalls = Math.max(1,
+                Math.min(circuitBreakerMinimumNumberOfCalls, this.circuitBreakerSlidingWindowSize));
+        this.defaultTimeoutMs = Math.max(0, defaultTimeoutMs);
         this.failClosed = failClosed;
         this.classifierEnabled = classifierEnabled;
         this.downstreamReadableFailuresPatterns =
@@ -196,8 +197,8 @@ public final class AgentConfig {
         this.businessExceptionsPatterns = immutableCopy(businessExceptionsPatterns);
         this.perJobGovernanceEnabled = perJobGovernanceEnabled;
         this.perJobMaxTrackedJobs = Math.max(1, perJobMaxTrackedJobs);
-        this.perJobIdleTtlMs = perJobIdleTtlMs;
-        this.perJobReapIntervalMs = perJobReapIntervalMs;
+        this.perJobIdleTtlMs = Math.max(1L, perJobIdleTtlMs);
+        this.perJobReapIntervalMs = Math.max(1L, perJobReapIntervalMs);
         this.traceLogLevel = traceLogLevel;
         this.auditLogLevel = auditLogLevel;
         this.logSampleRate = Math.max(1, logSampleRate);
@@ -208,6 +209,10 @@ public final class AgentConfig {
         return patterns == null || patterns.isEmpty()
                 ? Collections.emptyList()
                 : Collections.unmodifiableList(new ArrayList<>(patterns));
+    }
+
+    private static int clampPercentage(int value) {
+        return Math.max(0, Math.min(100, value));
     }
 
     public static AgentConfig load(String agentArgs) {

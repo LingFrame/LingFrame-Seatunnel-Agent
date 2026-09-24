@@ -83,5 +83,31 @@ class AgentConfigTest {
             assertThat(config.isGrayRoutingEnabled()).isTrue();
             assertThat(config.isPermissionEnabled()).isTrue();
         }
+
+        @Test
+        @DisplayName("非法数值应钳制到运行时合法范围")
+        void shouldClampInvalidRuntimeValues(@TempDir Path tempDir) throws IOException {
+            final Path configPath = tempDir.resolve("lingframe-governance.yaml");
+            Files.write(configPath, (
+                    "governance:\n" +
+                    "  resilience:\n" +
+                    "    rate-limit-per-second: -1\n" +
+                    "    circuit-breaker-failure-rate-threshold: 120\n" +
+                    "    circuit-breaker-sliding-window-size: -5\n" +
+                    "    circuit-breaker-minimum-number-of-calls: 99\n" +
+                    "    default-timeout-ms: -10\n" +
+                    "  per-job-idle-ttl-ms: 0\n" +
+                    "  per-job-reap-interval-ms: -1\n"
+            ).getBytes());
+
+            final AgentConfig config = AgentConfig.load(configPath.toString());
+            assertThat(config.getRateLimitPerSecond()).isZero();
+            assertThat(config.getCircuitBreakerFailureRateThreshold()).isEqualTo(100);
+            assertThat(config.getCircuitBreakerSlidingWindowSize()).isEqualTo(1);
+            assertThat(config.getCircuitBreakerMinimumNumberOfCalls()).isEqualTo(1);
+            assertThat(config.getDefaultTimeoutMs()).isZero();
+            assertThat(config.getPerJobIdleTtlMs()).isEqualTo(1L);
+            assertThat(config.getPerJobReapIntervalMs()).isEqualTo(1L);
+        }
     }
 }
