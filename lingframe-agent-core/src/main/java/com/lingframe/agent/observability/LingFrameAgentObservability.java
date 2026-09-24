@@ -77,6 +77,11 @@ public class LingFrameAgentObservability implements LingFrameAgentObservabilityM
     }
 
     @Override
+    public String getGovernanceProfile() {
+        return config != null ? config.getGovernanceProfile().name() : "CLEANUP_ONLY";
+    }
+
+    @Override
     public String getJobIdExtractorStatus() {
         return statusOrEmpty("JobIdExtractor");
     }
@@ -146,6 +151,7 @@ public class LingFrameAgentObservability implements LingFrameAgentObservabilityM
         return new StringBuilder(256)
                 .append("governance=").append(config.isGovernanceEnabled())
                 .append(", resilience=").append(isResilienceEnabled())
+                .append(", profile=").append(getGovernanceProfile())
                 .append(", runtimeStatus=").append(getGovernanceRuntimeStatus())
                 .append(", jobIdStatus=").append(getJobIdExtractorStatus())
                 .append(", taskAdvice(eff)=").append(config.isEffectiveTaskExecutionAdviceEnabled())

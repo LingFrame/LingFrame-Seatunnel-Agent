@@ -27,6 +27,16 @@ import java.util.Map;
  */
 public final class AgentConfig {
 
+    /**
+     * Agent 运行档位：cleanup-only 只做卸载清理，observe 允许治理观测但不硬拒绝，
+     * enforce 允许按 fail-closed 配置执行硬拒绝。
+     */
+    public enum GovernanceProfile {
+        CLEANUP_ONLY,
+        OBSERVE,
+        ENFORCE
+    }
+
     private static final Logger log = LoggerFactory.getLogger(AgentConfig.class);
 
     private static final String DEFAULT_CONFIG_PATH = "config/lingframe-governance.yaml";
@@ -421,6 +431,16 @@ public final class AgentConfig {
                 || rateLimiterEnabled
                 || bulkheadEnabled
                 || timeoutEnabled));
+    }
+
+    /**
+     * 根据实际有效切点和拒绝策略推导运行档位，避免配置摘要只显示零散布尔开关。
+     */
+    public GovernanceProfile getGovernanceProfile() {
+        if (!isEffectiveTaskExecutionAdviceEnabled()) {
+            return GovernanceProfile.CLEANUP_ONLY;
+        }
+        return failClosed ? GovernanceProfile.ENFORCE : GovernanceProfile.OBSERVE;
     }
 
     public boolean isFailClosed() {

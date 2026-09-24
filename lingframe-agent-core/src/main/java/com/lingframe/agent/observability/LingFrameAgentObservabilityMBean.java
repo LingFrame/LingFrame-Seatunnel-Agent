@@ -33,6 +33,9 @@ public interface LingFrameAgentObservabilityMBean {
     /** 治理运行时状态：DISABLED / ACTIVE / NO_RUNTIME / FAILED / UNKNOWN。 */
     String getGovernanceRuntimeStatus();
 
+    /** 有效运行档位：CLEANUP_ONLY / OBSERVE / ENFORCE。 */
+    String getGovernanceProfile();
+
     /** 作业级治理能力状态：DISABLED / INSTALLED / UNSUPPORTED_VERSION / NO_RUNTIME / UNKNOWN。 */
     String getJobIdExtractorStatus();
 
