@@ -172,8 +172,8 @@ public final class HazelcastConfigCenter {
      * 缺省再回退全局裸 key/{@code fallback}——作业级配置缺省逐级回退全局，符合 opt-in 语义。
      */
     private LingRuntimeConfig buildConfigFromMap(LingRuntimeConfig fallback, String globalJobId) {
-        final LingRuntimeConfig.LingRuntimeConfigBuilder builder = LingRuntimeConfig.builder()
-                .maxHistorySnapshots(fallback.getMaxHistorySnapshots())
+        // 从当前配置复制，避免刷新单个字段时丢失组件开关、熔断窗口等未变更字段。
+        final LingRuntimeConfig.LingRuntimeConfigBuilder builder = fallback.toBuilder()
                 // bulkhead-max-concurrent 纳入 IMap 热刷 key 集合（缺省回退现有值）。
                 .bulkheadMaxConcurrent(parseInt(
                         cfgKey(configMap, globalJobId, KEY_BULKHEAD_MAX_CONCURRENT), fallback.getBulkheadMaxConcurrent()));
