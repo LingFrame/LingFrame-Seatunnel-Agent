@@ -354,6 +354,29 @@ class SeaTunnelAdapterTest {
             assertThat(metrics.getSuccessRequests().sum()).isEqualTo(1L);
             assertThat(metrics.getMaxLatencyMs().get()).isEqualTo(0L);
         }
+
+        @Test
+        @DisplayName("重复 afterTaskCall 只应结算一次真实结果")
+        void shouldSettleDuplicateAfterTaskCallOnlyOnce() {
+            final AgentConfig config = TestAgentConfigs.create(
+                    true, true, true, false, false, false);
+            final AgentGovernanceRuntime runtime = AgentPipelineFactory.create(config);
+            final SeaTunnelAdapter adapter = new SeaTunnelAdapter(
+                    config,
+                    runtime.getPipelineEngine(),
+                    runtime.getUnloadCoordinator(),
+                    runtime.getConfigCenter(),
+                    runtime.getEventBus(),
+                    runtime.getMetricsCollector());
+
+            adapter.beforeTaskCall();
+            adapter.afterTaskCall(null);
+            adapter.afterTaskCall(null);
+
+            final LingHealthMetrics metrics = runtime.getMetricsCollector().getOrCreate("seatunnel");
+            assertThat(metrics.getTotalRequests().sum()).isEqualTo(2L);
+            assertThat(metrics.getSuccessRequests().sum()).isEqualTo(2L);
+        }
     }
 
     @Nested
