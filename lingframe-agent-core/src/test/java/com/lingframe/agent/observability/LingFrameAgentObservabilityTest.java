@@ -24,6 +24,8 @@ public class LingFrameAgentObservabilityTest {
         status.put("AbstractTask", "INSTALLED");
         status.put("DefaultClassLoaderService", "ABSENT");
         status.put("TcclGuard", "INSTALLED");
+        status.put("GovernanceRuntime", "DISABLED");
+        status.put("JobIdExtractor", "NO_RUNTIME");
         final AgentConfig cfg = AgentConfig.load(null);
         final LingFrameAgentObservability mbean =
                 new LingFrameAgentObservability(cfg, status, new EventBus(), null);
@@ -32,6 +34,8 @@ public class LingFrameAgentObservabilityTest {
         assertFalse(mbean.isClassLoaderReleaseAdviceInstalled());
         assertTrue(mbean.isTcclGuardAdviceInstalled());
         assertEquals("ABSENT", mbean.getClassloaderServiceClassStatus());
+        assertEquals("DISABLED", mbean.getGovernanceRuntimeStatus());
+        assertEquals("NO_RUNTIME", mbean.getJobIdExtractorStatus());
     }
 
     @Test
@@ -52,6 +56,8 @@ public class LingFrameAgentObservabilityTest {
         assertEquals(-1L, mbean.getEventBusDroppedCount());
         assertEquals(-1L, mbean.getEventBusSubmittedCount());
         assertEquals("UNKNOWN", mbean.getAbstractTaskClassStatus());
+        assertEquals("UNKNOWN", mbean.getGovernanceRuntimeStatus());
+        assertEquals("UNKNOWN", mbean.getJobIdExtractorStatus());
         assertEquals("config=null", mbean.getConfigSummary());
     }
 

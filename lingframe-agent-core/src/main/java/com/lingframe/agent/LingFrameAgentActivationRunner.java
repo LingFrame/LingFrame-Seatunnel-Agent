@@ -106,6 +106,7 @@ public final class LingFrameAgentActivationRunner {
         final Map<String, String> adviceStatus = new HashMap<>();
 
         if (governanceRuntimeRequired) {
+            adviceStatus.put("GovernanceRuntime", governanceRuntime != null ? "ACTIVE" : "FAILED");
             // 作业级治理装配：运行时指纹门控 + JobLingRegistry（隔离单元从引擎收敛到作业）
             wireJobLevelGovernance(config, adapter, governanceRuntime, adviceStatus);
         } else {

@@ -30,6 +30,12 @@ public interface LingFrameAgentObservabilityMBean {
     /** DefaultClassLoaderService 目标类状态 */
     String getClassloaderServiceClassStatus();
 
+    /** 治理运行时状态：DISABLED / ACTIVE / NO_RUNTIME / FAILED / UNKNOWN。 */
+    String getGovernanceRuntimeStatus();
+
+    /** 作业级治理能力状态：DISABLED / INSTALLED / UNSUPPORTED_VERSION / NO_RUNTIME / UNKNOWN。 */
+    String getJobIdExtractorStatus();
+
     /* ==================== per-call 钩子耗时统计 ==================== */
 
     boolean isTimingEnabled();
