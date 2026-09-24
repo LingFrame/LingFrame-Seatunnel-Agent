@@ -49,7 +49,7 @@ governance:
     timeout-enabled: false
 ```
 
-`resilience.enabled: true` 可一键开启弹性治理；也可以单独开启熔断、限流、舱壁或超时。
+`resilience.enabled: true` 允许弹性治理；仍需同时开启对应组件开关才会启用具体能力。GOVERN_ONLY 批次路径支持限流/熔断准入与结果回灌，舱壁/超时的真实执行隔离只在 Core 普通调用路径生效。
 关闭弹性治理只跳过相关调用控制，ClassLoader 全生命周期清理、TCCL 防御和卸载钩子仍然保留。
 
 ## JMX 可观测性
