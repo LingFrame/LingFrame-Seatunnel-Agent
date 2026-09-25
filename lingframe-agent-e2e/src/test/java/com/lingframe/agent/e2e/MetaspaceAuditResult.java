@@ -33,15 +33,47 @@ final class MetaspaceAuditResult {
         this.totalJobExecutions = totalJobExecutions;
     }
 
-    long getBaseline() { return baseline; }
-    List<Long> getRoundUsed() { return roundUsed; }
-    long getFinalUsed() { return finalUsed; }
-    long getNetGrowth() { return netGrowth; }
-    long getLoadedDelta() { return loadedDelta; }
-    long getUnloadedDelta() { return unloadedDelta; }
-    long getRetainedClasses() { return retainedClasses; }
-    long getClassLoaderCount() { return classLoaderCount; }
-    ClassLoaderStatsResult getBaselineClStats() { return baselineClStats; }
-    ClassLoaderStatsResult getPreGcClStats() { return preGcClStats; }
-    int getTotalJobExecutions() { return totalJobExecutions; }
+    long getBaseline() {
+        return baseline;
+    }
+
+    List<Long> getRoundUsed() {
+        return roundUsed;
+    }
+
+    long getFinalUsed() {
+        return finalUsed;
+    }
+
+    long getNetGrowth() {
+        return netGrowth;
+    }
+
+    long getLoadedDelta() {
+        return loadedDelta;
+    }
+
+    long getUnloadedDelta() {
+        return unloadedDelta;
+    }
+
+    long getRetainedClasses() {
+        return retainedClasses;
+    }
+
+    long getClassLoaderCount() {
+        return classLoaderCount;
+    }
+
+    ClassLoaderStatsResult getBaselineClStats() {
+        return baselineClStats;
+    }
+
+    ClassLoaderStatsResult getPreGcClStats() {
+        return preGcClStats;
+    }
+
+    int getTotalJobExecutions() {
+        return totalJobExecutions;
+    }
 }

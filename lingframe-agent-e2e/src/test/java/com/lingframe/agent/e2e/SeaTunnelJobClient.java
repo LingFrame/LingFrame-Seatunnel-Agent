@@ -20,6 +20,9 @@ import java.util.regex.Pattern;
 final class SeaTunnelJobClient {
     private static final Logger log = LoggerFactory.getLogger(SeaTunnelJobClient.class);
 
+    private SeaTunnelJobClient() {
+    }
+
     static final int MAX_SUBMIT_RETRIES = 3;
     static final long RETRY_DELAY_MS = 2000L;
 

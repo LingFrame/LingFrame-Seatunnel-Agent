@@ -21,6 +21,9 @@ import java.util.stream.Stream;
 final class SeaTunnelJobMatrix {
     private static final Logger log = LoggerFactory.getLogger(SeaTunnelJobMatrix.class);
 
+    private SeaTunnelJobMatrix() {
+    }
+
     static String applyTopicPrefix(String jobConfig, String topicPrefix) {
         if (topicPrefix == null || topicPrefix.isEmpty()) {
             return jobConfig;

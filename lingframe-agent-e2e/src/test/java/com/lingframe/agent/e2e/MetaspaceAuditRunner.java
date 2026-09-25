@@ -17,6 +17,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 final class MetaspaceAuditRunner {
     private static final Logger log = LoggerFactory.getLogger(MetaspaceAuditRunner.class);
 
+    private MetaspaceAuditRunner() {
+    }
+
     private static String formatMb(long bytes) {
         return String.format(java.util.Locale.ROOT, "%.2f MB", bytes / (1024.0 * 1024.0));
     }
@@ -62,7 +65,8 @@ final class MetaspaceAuditRunner {
             for (int i = 0; i < matrixJobs.size(); i++) {
                 final String jobConfig = matrixJobs.get(i);
                 final String jobTag = targetLabel + "-r" + round + "-j" + (i + 1);
-                final String jobId = SeaTunnelJobClient.submitJob(restUrl, jobTag, SeaTunnelJobMatrix.applyTopicPrefix(jobConfig, topicPrefix));
+                final String isolatedConfig = SeaTunnelJobMatrix.applyTopicPrefix(jobConfig, topicPrefix);
+                final String jobId = SeaTunnelJobClient.submitJob(restUrl, jobTag, isolatedConfig);
                 allJobIds.add(jobId);
                 Thread.sleep(200);
             }

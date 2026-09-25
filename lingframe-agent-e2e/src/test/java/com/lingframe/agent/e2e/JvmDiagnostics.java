@@ -20,6 +20,9 @@ import java.util.regex.Matcher;
 final class JvmDiagnostics {
     private static final Logger log = LoggerFactory.getLogger(JvmDiagnostics.class);
 
+    private JvmDiagnostics() {
+    }
+
     static boolean isDockerContainerRunning(String containerName) {
         try {
             final Process p = new ProcessBuilder("docker", "inspect", "-f", "{{.State.Running}}", containerName)
