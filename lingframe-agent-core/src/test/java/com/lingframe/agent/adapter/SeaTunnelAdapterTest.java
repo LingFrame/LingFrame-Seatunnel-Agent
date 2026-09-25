@@ -290,11 +290,9 @@ class SeaTunnelAdapterTest {
             final LingHealthMetrics metrics = runtime.getMetricsCollector().getOrCreate("seatunnel");
             assertThat(metrics).isNotNull();
             // 物理事实验证：
-            // 1. beforeTaskCall 穿透真实微内核流水线，内建 TrafficMetricsFilter 记录 7 次准入成功
-            // 2. afterTaskCall 回灌真实任务执行结果，记录 5 次业务成功 + 2 次可用性失败
-            // 3. 两者在 LingHealthMetrics 统一累加，验证真实流水线与回灌通道全部生效且无上下文泄漏
-            assertThat(metrics.getTotalRequests().sum()).isEqualTo(14L);
-            assertThat(metrics.getSuccessRequests().sum()).isEqualTo(12L);
+            // GOVERN_ONLY 不把准入成功冒充业务成功；afterTaskCall 统一记录 5 次业务成功 + 2 次可用性失败。
+            assertThat(metrics.getTotalRequests().sum()).isEqualTo(7L);
+            assertThat(metrics.getSuccessRequests().sum()).isEqualTo(5L);
             assertThat(metrics.getFailedRequests().sum()).isEqualTo(2L);
         }
 
@@ -500,7 +498,7 @@ class SeaTunnelAdapterTest {
             final LingHealthMetrics metrics = runtime.getMetricsCollector().getOrCreate("seatunnel");
             // 2 次业务异常被排除：失败计数保持 0，不会虚高失败率触发 DEGRADED 后每批次 +100ms 自我放大
             assertThat(metrics.getFailedRequests().sum()).isEqualTo(0L);
-            assertThat(metrics.getSuccessRequests().sum()).isEqualTo(12L);
+            assertThat(metrics.getSuccessRequests().sum()).isEqualTo(5L);
         }
 
         @Test
@@ -525,7 +523,7 @@ class SeaTunnelAdapterTest {
 
             final LingHealthMetrics metrics = runtime.getMetricsCollector().getOrCreate("seatunnel");
             assertThat(metrics.getFailedRequests().sum()).isEqualTo(2L);
-            assertThat(metrics.getSuccessRequests().sum()).isEqualTo(8L);
+            assertThat(metrics.getSuccessRequests().sum()).isEqualTo(3L);
         }
 
         @Test
