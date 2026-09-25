@@ -253,27 +253,38 @@ public final class HazelcastConfigCenter {
      */
     private List<UUID> registerConfigListeners(IMap<String, String> map) {
         final List<UUID> ids = new ArrayList<>();
-        ids.add(map.addEntryListener((EntryAddedListener<String, String>) event -> {
-            log.info("Config entry added: {} = {}", event.getKey(), event.getValue());
-            refreshConfig(event.getKey());
-        }, true));
-        ids.add(map.addEntryListener((EntryUpdatedListener<String, String>) event -> {
-            log.info("Config entry updated: {} = {}", event.getKey(), event.getValue());
-            refreshConfig(event.getKey());
-        }, true));
-        ids.add(map.addEntryListener((EntryRemovedListener<String, String>) event -> {
-            log.info("Config entry removed: {}", event.getKey());
-            refreshConfig(event.getKey());
-        }, true));
-        ids.add(map.addEntryListener((EntryEvictedListener<String, String>) event -> {
-            log.info("Config entry evicted: {}", event.getKey());
-            refreshConfig(event.getKey());
-        }, true));
-        ids.add(map.addEntryListener((EntryExpiredListener<String, String>) event -> {
-            log.info("Config entry expired: {}", event.getKey());
-            refreshConfig(event.getKey());
-        }, true));
-        return ids;
+        try {
+            ids.add(map.addEntryListener((EntryAddedListener<String, String>) event -> {
+                log.info("Config entry added: {} = {}", event.getKey(), event.getValue());
+                refreshConfig(event.getKey());
+            }, true));
+            ids.add(map.addEntryListener((EntryUpdatedListener<String, String>) event -> {
+                log.info("Config entry updated: {} = {}", event.getKey(), event.getValue());
+                refreshConfig(event.getKey());
+            }, true));
+            ids.add(map.addEntryListener((EntryRemovedListener<String, String>) event -> {
+                log.info("Config entry removed: {}", event.getKey());
+                refreshConfig(event.getKey());
+            }, true));
+            ids.add(map.addEntryListener((EntryEvictedListener<String, String>) event -> {
+                log.info("Config entry evicted: {}", event.getKey());
+                refreshConfig(event.getKey());
+            }, true));
+            ids.add(map.addEntryListener((EntryExpiredListener<String, String>) event -> {
+                log.info("Config entry expired: {}", event.getKey());
+                refreshConfig(event.getKey());
+            }, true));
+            return ids;
+        } catch (RuntimeException e) {
+            for (UUID id : ids) {
+                try {
+                    map.removeEntryListener(id);
+                } catch (Exception cleanupError) {
+                    log.debug("Failed to roll back config listener {}", id, cleanupError);
+                }
+            }
+            throw e;
+        }
     }
 
     /**

@@ -99,6 +99,11 @@ public class AgentConfigObservabilityTest {
                 true, true, false, false, false, true, false);
         assertEquals(AgentConfig.BatchTimeoutCapability.OBSERVE_ONLY,
                 enabled.getBatchTimeoutCapability());
+
+        final AgentConfig governanceDisabled = TestAgentConfigs.createWithResilienceEnabled(
+                true, false, false, false, false, false, false);
+        assertEquals(AgentConfig.BatchTimeoutCapability.DISABLED,
+                governanceDisabled.getBatchTimeoutCapability());
     }
 
     @Test

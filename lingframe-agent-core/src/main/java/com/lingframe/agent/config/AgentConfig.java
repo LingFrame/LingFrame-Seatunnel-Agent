@@ -450,7 +450,8 @@ public final class AgentConfig {
     }
 
     public BatchTimeoutCapability getBatchTimeoutCapability() {
-        return resilienceEnabled && timeoutEnabled
+        return governanceEnabled && isEffectiveTaskExecutionAdviceEnabled()
+                && resilienceEnabled && timeoutEnabled
                 ? BatchTimeoutCapability.OBSERVE_ONLY
                 : BatchTimeoutCapability.DISABLED;
     }

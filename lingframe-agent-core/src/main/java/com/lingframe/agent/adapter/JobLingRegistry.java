@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.Set;
 
 /**
  * 作业级虚拟灵元注册表（作业身份 → 灵元 一对一路由 + 生命周期管理）。
@@ -46,6 +47,8 @@ public final class JobLingRegistry {
 
     /** 记账：jobId → 最近活跃时间戳（写入时机见 resolve）。 */
     private final ConcurrentHashMap<Long, Long> activeJobs = new ConcurrentHashMap<>();
+    /** 清理失败待重试的作业灵元。 */
+    private final Set<Long> pendingCleanup = ConcurrentHashMap.newKeySet();
     /** 注册/回收临界区锁：串行化「注册新作业」与「Reaper 回收」，防同 job 竞态。 */
     private final Object reapLock = new Object();
 
@@ -104,7 +107,10 @@ public final class JobLingRegistry {
                 }
                 return null;
             }
-            registerJobLing(jobId);
+            if (!registerJobLing(jobId)) {
+                activeJobs.remove(jobId);
+                return null;
+            }
         }
         maybeReap(now);
         return jobLingId(jobId);
@@ -115,7 +121,9 @@ public final class JobLingRegistry {
         if (jobId < 0L) {
             return;
         }
-        activeJobs.put(jobId, System.currentTimeMillis());
+        final long now = System.currentTimeMillis();
+        activeJobs.put(jobId, now);
+        maybeReap(now);
     }
 
     /** 当前跟踪的作业数（MBean/测试断言）。 */
@@ -141,13 +149,15 @@ public final class JobLingRegistry {
     }
 
     /** 幂等注册作业灵元。register 对同 ID 自动更新配置并回 ACTIVE，故并发安全。 */
-    private void registerJobLing(long jobId) {
+    private boolean registerJobLing(long jobId) {
         try {
             virtualLingManager.register(jobLingId(jobId), jobLingTemplate);
             log.debug("Registered job ling [{}]", jobLingId(jobId));
+            return true;
         } catch (Exception e) {
             log.warn("Failed to register job ling [{}], job falls back to shared ling",
                     jobLingId(jobId), e);
+            return false;
         }
     }
 
@@ -161,6 +171,11 @@ public final class JobLingRegistry {
     }
 
     private void reapIdleJobs(long now) {
+        for (Long jobId : pendingCleanup) {
+            if (recycleJobLing(jobId)) {
+                pendingCleanup.remove(jobId);
+            }
+        }
         final long idleBefore = now - idleTtlMs;
         for (Long jobId : activeJobs.keySet()) {
             final Long lastActive = activeJobs.get(jobId);
@@ -170,7 +185,9 @@ public final class JobLingRegistry {
                     final Long cur = activeJobs.get(jobId);
                     if (cur != null && cur < idleBefore) {
                         activeJobs.remove(jobId);
-                        recycleJobLing(jobId);
+                        if (!recycleJobLing(jobId)) {
+                            pendingCleanup.add(jobId);
+                        }
                     }
                 }
             }
@@ -178,23 +195,34 @@ public final class JobLingRegistry {
     }
 
     /** 完整回收链：unregister（状态机+仓储）→ evict（熔断/限流缓存）→ remove（健康指标）。 */
-    private void recycleJobLing(long jobId) {
+    private boolean recycleJobLing(long jobId) {
         final String lingId = jobLingId(jobId);
+        boolean success = true;
         try {
             virtualLingManager.unregister(lingId);
         } catch (Exception e) {
             log.warn("Error unregistering job ling [{}]", lingId, e);
+            success = false;
         }
-        try {
-            pipelineEngine.evictLingResources(lingId);
-        } catch (Exception e) {
-            log.warn("Error evicting job ling [{}] resilience resources", lingId, e);
+        if (pipelineEngine != null) {
+            try {
+                pipelineEngine.evictLingResources(lingId);
+            } catch (Exception e) {
+                log.warn("Error evicting job ling [{}] resilience resources", lingId, e);
+                success = false;
+            }
         }
-        try {
-            metricsCollector.remove(lingId);
-        } catch (Exception e) {
-            log.warn("Error removing job ling [{}] metrics", lingId, e);
+        if (metricsCollector != null) {
+            try {
+                metricsCollector.remove(lingId);
+            } catch (Exception e) {
+                log.warn("Error removing job ling [{}] metrics", lingId, e);
+                success = false;
+            }
         }
-        log.info("Reaped idle job ling [{}]", lingId);
+        if (success) {
+            log.info("Reaped idle job ling [{}]", lingId);
+        }
+        return success;
     }
 }
