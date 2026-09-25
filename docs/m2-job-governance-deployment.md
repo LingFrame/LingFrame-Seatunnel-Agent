@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 适用 | lingframe-seatunnel-agent 及 lingframe-core 0.4.6 及以上 |
+| 适用 | lingframe-seatunnel-agent 0.3.0 及 lingframe-core 0.4.7 及以上 |
 | 读者 | 平台运维 / SRE / 集群负责人 |
 
 ---

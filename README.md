@@ -105,6 +105,8 @@ mvn -B clean verify -Pintegration-check
 
 ## 版本
 
+当前版本：`lingframe-seatunnel-agent 0.3.0`，默认适配 `lingframe-core 0.4.7`。
+
 版本号格式：`{agent-version}-seatunnel-{seatunnel-baseline}`。
 
 ## License

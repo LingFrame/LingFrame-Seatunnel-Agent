@@ -685,7 +685,7 @@ class SeaTunnelAdapterTest {
     }
 
     /**
-     * 兼容已发布的 Core 0.4.6 与包含 GOVERN_ONLY 统计修复的本地 Core。
+     * 兼容已发布的 Core 0.4.7 与包含 GOVERN_ONLY 统计修复的本地 Core。
      * <p>
      * 旧版 Core 会在 Agent 回灌结果之外再次记录一次准入结果，因此出现双计数；
      * 本地修复版只保留 Agent 回灌的真实业务结果。Core 发布修复版本后可移除旧值。
