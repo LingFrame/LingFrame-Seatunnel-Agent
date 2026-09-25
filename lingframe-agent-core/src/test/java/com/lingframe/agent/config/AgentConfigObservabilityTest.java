@@ -74,5 +74,46 @@ public class AgentConfigObservabilityTest {
         final AgentConfig c = new AgentConfig(true, false, false, false, false, false, false,
                 100, 50, 20, 3000, false);
         assertFalse(c.isEffectiveTaskExecutionAdviceEnabled());
+        assertEquals(AgentConfig.GovernanceProfile.CLEANUP_ONLY, c.getGovernanceProfile());
+    }
+
+    @Test
+    public void profileDistinguishesObserveAndEnforce() {
+        final AgentConfig observe = new AgentConfig(true, true, true, false, false, false, false,
+                100, 50, 20, 3000, false);
+        assertEquals(AgentConfig.GovernanceProfile.OBSERVE, observe.getGovernanceProfile());
+
+        final AgentConfig enforce = new AgentConfig(true, true, true, false, false, false, false,
+                100, 50, 20, 3000, true);
+        assertEquals(AgentConfig.GovernanceProfile.ENFORCE, enforce.getGovernanceProfile());
+    }
+
+    @Test
+    public void batchTimeoutIsExplicitlyObservationOnly() {
+        final AgentConfig disabled = TestAgentConfigs.createWithResilienceEnabled(
+                false, true, false, false, false, false, false);
+        assertEquals(AgentConfig.BatchTimeoutCapability.DISABLED,
+                disabled.getBatchTimeoutCapability());
+
+        final AgentConfig enabled = TestAgentConfigs.createWithResilienceEnabled(
+                true, true, false, false, false, true, false);
+        assertEquals(AgentConfig.BatchTimeoutCapability.OBSERVE_ONLY,
+                enabled.getBatchTimeoutCapability());
+
+        final AgentConfig governanceDisabled = TestAgentConfigs.createWithResilienceEnabled(
+                true, false, false, false, false, false, false);
+        assertEquals(AgentConfig.BatchTimeoutCapability.DISABLED,
+                governanceDisabled.getBatchTimeoutCapability());
+    }
+
+    @Test
+    public void resilienceGlobalSwitchDisablesElasticAdviceOnly() {
+        final AgentConfig c = TestAgentConfigs.createWithResilienceEnabled(
+                false, true, true, true, false, false, false);
+        assertFalse(c.isEffectiveTaskExecutionAdviceEnabled());
+
+        final AgentConfig permissionConfig = TestAgentConfigs.createWithResilienceEnabled(
+                false, true, false, false, false, true, false);
+        assertTrue(permissionConfig.isEffectiveTaskExecutionAdviceEnabled());
     }
 }

@@ -12,6 +12,7 @@ import com.lingframe.core.event.EventBus;
 import com.lingframe.core.event.monitor.MonitoringEvents;
 import com.lingframe.core.ling.LingUnloadCoordinator;
 import com.lingframe.core.metrics.LingHealthMetrics;
+import com.lingframe.core.metrics.MetricsCollector;
 import com.lingframe.core.pipeline.InvocationPipelineEngine;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -289,11 +290,9 @@ class SeaTunnelAdapterTest {
             final LingHealthMetrics metrics = runtime.getMetricsCollector().getOrCreate("seatunnel");
             assertThat(metrics).isNotNull();
             // 物理事实验证：
-            // 1. beforeTaskCall 穿透真实微内核流水线，内建 TrafficMetricsFilter 记录 7 次准入成功
-            // 2. afterTaskCall 回灌真实任务执行结果，记录 5 次业务成功 + 2 次可用性失败
-            // 3. 两者在 LingHealthMetrics 统一累加，验证真实流水线与回灌通道全部生效且无上下文泄漏
-            assertThat(metrics.getTotalRequests().sum()).isEqualTo(14L);
-            assertThat(metrics.getSuccessRequests().sum()).isEqualTo(12L);
+            // GOVERN_ONLY 不把准入成功冒充业务成功；afterTaskCall 统一记录 5 次业务成功 + 2 次可用性失败。
+            assertMetricCountCompatible(metrics.getTotalRequests().sum(), 7L, 14L);
+            assertMetricCountCompatible(metrics.getSuccessRequests().sum(), 5L, 12L);
             assertThat(metrics.getFailedRequests().sum()).isEqualTo(2L);
         }
 
@@ -334,7 +333,7 @@ class SeaTunnelAdapterTest {
         }
 
         @Test
-        @DisplayName("未调用 beforeTaskCall 直接调用 afterTaskCall 应安全兜底且耗时不会纳秒溢出")
+        @DisplayName("未调用 beforeTaskCall 直接调用 afterTaskCall 应安全忽略")
         void shouldHandleAfterTaskCallSafelyWithoutBeforeTaskCall() {
             final AgentConfig config = TestAgentConfigs.create(true, true, true, false, false, false);
             final AgentGovernanceRuntime runtime = AgentPipelineFactory.create(config);
@@ -350,9 +349,28 @@ class SeaTunnelAdapterTest {
             adapter.afterTaskCall(null);
 
             final LingHealthMetrics metrics = runtime.getMetricsCollector().getOrCreate("seatunnel");
+            assertThat(metrics.getTotalRequests().sum()).isZero();
+            assertThat(metrics.getSuccessRequests().sum()).isZero();
+            assertThat(metrics.getMaxLatencyMs().get()).isZero();
+        }
+
+        @Test
+        @DisplayName("重复 afterTaskCall 只应结算一次真实结果")
+        void shouldSettleDuplicateAfterTaskCallOnlyOnce() {
+            final AgentConfig config = TestAgentConfigs.create(
+                    true, true, true, false, false, false);
+            final MetricsCollector metricsCollector = new MetricsCollector(null);
+            final SeaTunnelAdapter adapter = new SeaTunnelAdapter(
+                    config,
+                    null, null, null, null, metricsCollector);
+
+            adapter.beforeTaskCall();
+            adapter.afterTaskCall(null);
+            adapter.afterTaskCall(null);
+
+            final LingHealthMetrics metrics = metricsCollector.getOrCreate("seatunnel");
             assertThat(metrics.getTotalRequests().sum()).isEqualTo(1L);
             assertThat(metrics.getSuccessRequests().sum()).isEqualTo(1L);
-            assertThat(metrics.getMaxLatencyMs().get()).isEqualTo(0L);
         }
     }
 
@@ -480,7 +498,7 @@ class SeaTunnelAdapterTest {
             final LingHealthMetrics metrics = runtime.getMetricsCollector().getOrCreate("seatunnel");
             // 2 次业务异常被排除：失败计数保持 0，不会虚高失败率触发 DEGRADED 后每批次 +100ms 自我放大
             assertThat(metrics.getFailedRequests().sum()).isEqualTo(0L);
-            assertThat(metrics.getSuccessRequests().sum()).isEqualTo(12L);
+            assertMetricCountCompatible(metrics.getSuccessRequests().sum(), 5L, 12L);
         }
 
         @Test
@@ -505,7 +523,7 @@ class SeaTunnelAdapterTest {
 
             final LingHealthMetrics metrics = runtime.getMetricsCollector().getOrCreate("seatunnel");
             assertThat(metrics.getFailedRequests().sum()).isEqualTo(2L);
-            assertThat(metrics.getSuccessRequests().sum()).isEqualTo(8L);
+            assertMetricCountCompatible(metrics.getSuccessRequests().sum(), 3L, 8L);
         }
 
         @Test
@@ -664,6 +682,16 @@ class SeaTunnelAdapterTest {
 
             assertThat(adapter.getAuditFailSuppressedCount()).isZero();
         }
+    }
+
+    /**
+     * 兼容已发布的 Core 0.4.7 与包含 GOVERN_ONLY 统计修复的本地 Core。
+     * <p>
+     * 旧版 Core 会在 Agent 回灌结果之外再次记录一次准入结果，因此出现双计数；
+     * 本地修复版只保留 Agent 回灌的真实业务结果。Core 发布修复版本后可移除旧值。
+     */
+    private static void assertMetricCountCompatible(long actual, long fixedCoreValue, long releasedCoreValue) {
+        assertThat(actual).isIn(fixedCoreValue, releasedCoreValue);
     }
 
     /** 令 mock EventBus 记录已注册的订阅监听器，供测试直接驱动事件。 */

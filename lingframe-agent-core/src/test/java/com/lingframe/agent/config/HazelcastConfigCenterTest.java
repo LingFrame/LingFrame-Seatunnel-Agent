@@ -170,6 +170,43 @@ class HazelcastConfigCenterTest {
         }
 
         @Test
+        @DisplayName("热刷单个字段时应保留未变更的组件开关与熔断参数")
+        void shouldPreserveUntouchedRuntimeConfigFields() {
+            final LingRuntime runtime = lingRepository.getRuntime("seatunnel");
+            runtime.updateConfig(LingRuntimeConfig.builder()
+                    .resilienceEnabled(true)
+                    .circuitBreakerEnabled(false)
+                    .rateLimiterEnabled(false)
+                    .bulkheadEnabled(false)
+                    .timeoutEnabled(false)
+                    .rateLimitPerSecond(80)
+                    .circuitBreakerFailureRateThreshold(35)
+                    .circuitBreakerSlidingWindowSize(40)
+                    .circuitBreakerMinimumNumberOfCalls(12)
+                    .defaultTimeoutMs(7000)
+                    .bulkheadMaxConcurrent(6)
+                    .build());
+            backingData.put(HazelcastConfigCenter.KEY_RATE_LIMIT, "120");
+
+            updatedListener.entryUpdated(new EntryEvent<>(
+                    "test-source", null, EntryEventType.UPDATED.getType(),
+                    HazelcastConfigCenter.KEY_RATE_LIMIT, "120"));
+
+            final LingRuntimeConfig refreshed = runtime.getConfig();
+            assertThat(refreshed.getRateLimitPerSecond()).isEqualTo(120);
+            assertThat(refreshed.isResilienceEnabled()).isTrue();
+            assertThat(refreshed.isCircuitBreakerEnabled()).isFalse();
+            assertThat(refreshed.isRateLimiterEnabled()).isFalse();
+            assertThat(refreshed.isBulkheadEnabled()).isFalse();
+            assertThat(refreshed.isTimeoutEnabled()).isFalse();
+            assertThat(refreshed.getCircuitBreakerFailureRateThreshold()).isEqualTo(35);
+            assertThat(refreshed.getCircuitBreakerSlidingWindowSize()).isEqualTo(40);
+            assertThat(refreshed.getCircuitBreakerMinimumNumberOfCalls()).isEqualTo(12);
+            assertThat(refreshed.getDefaultTimeoutMs()).isEqualTo(7000);
+            assertThat(refreshed.getBulkheadMaxConcurrent()).isEqualTo(6);
+        }
+
+        @Test
         @DisplayName("EntryAdded 事件触发时应正确刷新虚拟灵元配置")
         void shouldUpdateVirtualLingConfigOnEntryAdded() {
             backingData.put(HazelcastConfigCenter.KEY_RATE_LIMIT, "1200");

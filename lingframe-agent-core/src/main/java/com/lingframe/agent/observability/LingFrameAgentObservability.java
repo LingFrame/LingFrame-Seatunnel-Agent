@@ -71,6 +71,26 @@ public class LingFrameAgentObservability implements LingFrameAgentObservabilityM
         return statusOrEmpty("DefaultClassLoaderService");
     }
 
+    @Override
+    public String getGovernanceRuntimeStatus() {
+        return statusOrEmpty("GovernanceRuntime");
+    }
+
+    @Override
+    public String getGovernanceProfile() {
+        return config != null ? config.getGovernanceProfile().name() : "CLEANUP_ONLY";
+    }
+
+    @Override
+    public String getBatchTimeoutCapability() {
+        return config != null ? config.getBatchTimeoutCapability().name() : "DISABLED";
+    }
+
+    @Override
+    public String getJobIdExtractorStatus() {
+        return statusOrEmpty("JobIdExtractor");
+    }
+
     private String statusOrEmpty(String key) {
         final String s = adviceStatus.get(key);
         return s != null ? s : "UNKNOWN";
@@ -135,6 +155,11 @@ public class LingFrameAgentObservability implements LingFrameAgentObservabilityM
         }
         return new StringBuilder(256)
                 .append("governance=").append(config.isGovernanceEnabled())
+                .append(", resilience=").append(isResilienceEnabled())
+                .append(", profile=").append(getGovernanceProfile())
+                .append(", batchTimeout=").append(getBatchTimeoutCapability())
+                .append(", runtimeStatus=").append(getGovernanceRuntimeStatus())
+                .append(", jobIdStatus=").append(getJobIdExtractorStatus())
                 .append(", taskAdvice(eff)=").append(config.isEffectiveTaskExecutionAdviceEnabled())
                 .append(", devMode=").append(config.isDevMode())
                 .append(", traceLevel=").append(config.getTraceLogLevel())
@@ -151,5 +176,17 @@ public class LingFrameAgentObservability implements LingFrameAgentObservabilityM
             return;
         }
         adapter.resetHealthMetrics();
+    }
+
+    @Override
+    public void setResilienceEnabled(boolean enabled) {
+        if (adapter != null) {
+            adapter.setResilienceEnabled(enabled);
+        }
+    }
+
+    @Override
+    public boolean isResilienceEnabled() {
+        return adapter != null && adapter.isResilienceEnabled();
     }
 }

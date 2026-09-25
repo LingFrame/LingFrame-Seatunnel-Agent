@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 适用 | lingframe-seatunnel-agent 及 lingframe-core 0.4.5 及以上 |
+| 适用 | lingframe-seatunnel-agent 0.3.0 及 lingframe-core 0.4.7 及以上 |
 | 读者 | 平台运维 / SRE / 集群负责人 |
 
 ---
@@ -70,8 +70,11 @@ governance:
   per-job-idle-ttl-ms: 1800000           # 空闲回收 TTL（30min），Reaper 按周期扫描
   per-job-reap-interval-ms: 300000       # Reaper 节流间隔（5min）
   resilience:
-    circuit-breaker-enabled: true        # 熔断开关（opt-in）
-    rate-limiter-enabled: true           # 限流开关（opt-in）
+    enabled: false                       # 弹性治理总开关（默认关闭）
+    circuit-breaker-enabled: false       # 熔断开关（显式开启）
+    rate-limiter-enabled: false          # 限流开关（显式开启）
+    bulkhead-enabled: false              # 舱壁开关（显式开启）
+    timeout-enabled: false               # 超时开关（显式开启）
     fail-closed: false                   # 硬拒绝门控：false=日志+放行；true=熔断/舱满硬拒
     classifier-enabled: true             # 熔断失败判定分类器：true=两层契约化分类；false=回退启发式
     downstream-readable-failures-patterns: []   # 下游可用性失败显式 patterns（正则 match FQCN/message）
@@ -100,6 +103,8 @@ governance:
 | `job.{jobId}.rate-limit-per-second` | 作业级 | 仅刷新 `seatunnel-job-{jobId}`；缺省逐级回退全局裸 key |
 
 **可热刷的 5 个 key**（其余 key 写入 IMap 不生效）：
+
+> 这些参数只有在 Agent 治理总开关和对应组件开关均开启、且治理运行时成功装配后才会被实际消费。GOVERN_ONLY 批次路径的限流/熔断属于准入与结果统计；舱壁/超时的线程执行隔离不覆盖 SeaTunnel 批次取消语义。
 
 | 裸 key | 对应参数 |
 | --- | --- |

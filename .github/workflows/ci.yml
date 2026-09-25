@@ -52,7 +52,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-and-test
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-
     steps:
       - uses: actions/checkout@v4
 
@@ -69,6 +68,24 @@ jobs:
           (cd lingframe-agent-e2e && docker compose pull) &
           mvn -B clean install -DskipTests
           wait
+
+      - name: Determine Detailed ClassLoader Audit Mode
+        id: e2e-mode
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ENABLE_CLASSLOADER_STATS=false
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            PRS=$(curl --fail --silent --show-error \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" || echo '[]')
+            if echo "$PRS" | jq -e 'length > 0' >/dev/null; then
+              ENABLE_CLASSLOADER_STATS=true
+            fi
+          fi
+          echo "classloader-stats=${ENABLE_CLASSLOADER_STATS}" >> "$GITHUB_OUTPUT"
+          echo "Detailed jmap -clstats collection: ${ENABLE_CLASSLOADER_STATS}"
 
       - name: Run E2E Tests
         run: |
@@ -102,7 +119,9 @@ jobs:
             exit 1
           fi
           TEST_STATUS=0
-          mvn -B verify || TEST_STATUS=$?
+          mvn -B verify \
+            -Dlingframe.test.classloader.stats=${{ steps.e2e-mode.outputs.classloader-stats }} \
+            || TEST_STATUS=$?
           echo "=== Metaspace Audit Log (target/logs/metaspace-audit.log) ==="
           cat target/logs/metaspace-audit.log 2>/dev/null || echo "No metaspace-audit.log found"
           echo "=== SeaTunnel Server Logs (always captured for cleaner/recycle audit) ==="

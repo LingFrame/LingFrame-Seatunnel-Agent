@@ -30,7 +30,7 @@ fi
 REPO="${MVN_REPO:-D:/MavenRepository}"
 DIST_SRC="$ROOT/../lingframe-agent-dist/target/lingframe-seatunnel-agent.jar"
 YAML_SRC="$ROOT/benchmark-governance.yaml"
-BENCH_JAR="$ROOT/target/lingframe-agent-benchmark-0.1.0.jar"
+BENCH_JAR="$ROOT/target/lingframe-agent-benchmark-0.3.0.jar"
 OUT_DIR="$ROOT/target/bench-results"
 
 # Windows 类路径分隔符（git-bash 下 java 是 Windows 二进制，用 ';'）

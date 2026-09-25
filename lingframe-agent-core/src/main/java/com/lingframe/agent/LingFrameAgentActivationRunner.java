@@ -86,13 +86,15 @@ public final class LingFrameAgentActivationRunner {
         // 引擎 ClassLoader 清理必须在治理门控之前安装：Metaspace 泄漏治理在任何模式均生效
         installEngineClassLoaderCleanup(inst);
 
-        final boolean governanceEnabled = config.isGovernanceEnabled();
+        final boolean governanceRuntimeRequired = config.isEffectiveTaskExecutionAdviceEnabled();
 
         // Bridge 契约注入已由 premain() 完成（见 LingFrameAgentPremain.premain），
         // 此处 LingGovernanceContract 经双亲委派统一由 Bootstrap 加载，单一副本。
 
-        // 初始化治理微内核与适配器（即使业务治理关闭，卸载协调器与底座钩子依然注册，确保物理释放正常生效）
-        final AgentGovernanceRuntime governanceRuntime = initGovernanceRuntime(config);
+        // 仅在确有治理切点时初始化治理微内核；cleanup-only 模式不创建 Pipeline、灵元或配置中心。
+        final AgentGovernanceRuntime governanceRuntime = governanceRuntimeRequired
+                ? initGovernanceRuntime(config)
+                : null;
         final SeaTunnelAdapter adapter = new SeaTunnelAdapter(
                 config,
                 governanceRuntime != null ? governanceRuntime.getPipelineEngine() : null,
@@ -103,9 +105,12 @@ public final class LingFrameAgentActivationRunner {
 
         final Map<String, String> adviceStatus = new HashMap<>();
 
-        if (governanceEnabled) {
+        if (governanceRuntimeRequired) {
+            adviceStatus.put("GovernanceRuntime", governanceRuntime != null ? "ACTIVE" : "FAILED");
             // 作业级治理装配：运行时指纹门控 + JobLingRegistry（隔离单元从引擎收敛到作业）
             wireJobLevelGovernance(config, adapter, governanceRuntime, adviceStatus);
+        } else {
+            adviceStatus.put("GovernanceRuntime", "DISABLED");
         }
 
         // 注册治理契约到 Bridge（提供 ClassLoader 清理与物理释放能力）
@@ -115,8 +120,8 @@ public final class LingFrameAgentActivationRunner {
         // 注册可观测性 MBean（JMX），运维可 jcmd/jconsole 直接读 advice 状态/EventBus/计时
         registerObservabilityMBean(config, adviceStatus, governanceRuntime, adapter);
 
-        if (!governanceEnabled) {
-            log.info("Governance is disabled by config, Agent runs in PASS_THROUGH / ClassLoader-cleanup-only mode");
+        if (!governanceRuntimeRequired) {
+            log.info("Governance runtime is disabled by config, Agent runs in PASS_THROUGH / ClassLoader-cleanup-only mode");
         } else {
             log.info("LingFrame SeaTunnel Agent activated successfully");
         }
@@ -194,6 +199,11 @@ public final class LingFrameAgentActivationRunner {
         return LingRuntimeConfig.builder()
                 .maxHistorySnapshots(1)
                 .bulkheadMaxConcurrent(10)
+                .resilienceEnabled(config.isResilienceEnabled())
+                .circuitBreakerEnabled(config.isCircuitBreakerEnabled())
+                .rateLimiterEnabled(config.isRateLimiterEnabled())
+                .bulkheadEnabled(config.isBulkheadEnabled())
+                .timeoutEnabled(config.isTimeoutEnabled())
                 .rateLimitPerSecond(config.getRateLimitPerSecond())
                 .circuitBreakerFailureRateThreshold(config.getCircuitBreakerFailureRateThreshold())
                 .circuitBreakerSlidingWindowSize(windowSize)

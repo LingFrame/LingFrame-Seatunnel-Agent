@@ -36,6 +36,20 @@ class AgentPipelineFactoryTest {
             final AgentGovernanceRuntime runtime2 = AgentPipelineFactory.create(config);
             assertThat(runtime1).isNotSameAs(runtime2);
         }
+
+        @Test
+        @DisplayName("应支持从 Core 一键关闭并恢复弹性治理")
+        void shouldToggleCoreResilienceSwitch() {
+            final AgentConfig config = TestAgentConfigs.createWithResilienceEnabled(
+                    true, true, true, true, false, false, true);
+            final AgentGovernanceRuntime runtime = AgentPipelineFactory.create(config);
+
+            assertThat(runtime.getPipelineEngine().isResilienceEnabled()).isTrue();
+            runtime.getPipelineEngine().setResilienceEnabled(false);
+            assertThat(runtime.getPipelineEngine().isResilienceEnabled()).isFalse();
+            runtime.getPipelineEngine().setResilienceEnabled(true);
+            assertThat(runtime.getPipelineEngine().isResilienceEnabled()).isTrue();
+        }
     }
 
     @Nested
@@ -60,7 +74,8 @@ class AgentPipelineFactoryTest {
         @Test
         @DisplayName("resilience 关闭时不应注册虚拟灵元")
         void shouldNotRegisterVirtualLingWhenResilienceDisabled() {
-            final AgentConfig config = TestAgentConfigs.create(true, false, false, false, false, true);
+            final AgentConfig config = TestAgentConfigs.createWithResilienceEnabled(
+                    false, true, true, true, false, false, true);
             final AgentGovernanceRuntime runtime = AgentPipelineFactory.create(config);
 
             final LingRuntime virtualLing = runtime.getLingRepository().getRuntime("seatunnel");
@@ -78,7 +93,8 @@ class AgentPipelineFactoryTest {
         @Test
         @DisplayName("resilience 关闭时 VirtualLingManager 应为 null")
         void shouldNotExposeVirtualLingManagerWhenResilienceDisabled() {
-            final AgentConfig config = TestAgentConfigs.create(true, false, false, false, false, true);
+            final AgentConfig config = TestAgentConfigs.createWithResilienceEnabled(
+                    false, true, true, true, false, false, true);
             final AgentGovernanceRuntime runtime = AgentPipelineFactory.create(config);
             assertThat(runtime.getVirtualLingManager()).isNull();
         }
@@ -86,7 +102,8 @@ class AgentPipelineFactoryTest {
         @Test
         @DisplayName("虚拟灵元 config 应包含限流和熔断参数")
         void shouldContainResilienceParams() {
-            final AgentConfig config = TestAgentConfigs.create(true, true, true, false, false, true);
+            final AgentConfig config = TestAgentConfigs.createWithResilienceEnabled(
+                    true, true, true, true, false, false, true);
             final AgentGovernanceRuntime runtime = AgentPipelineFactory.create(config);
 
             final LingRuntime virtualLing = runtime.getLingRepository().getRuntime("seatunnel");
@@ -94,6 +111,11 @@ class AgentPipelineFactoryTest {
             assertThat(virtualLing.getConfig().getRateLimitPerSecond()).isEqualTo(100);
             assertThat(virtualLing.getConfig().getCircuitBreakerFailureRateThreshold()).isEqualTo(50);
             assertThat(virtualLing.getConfig().getCircuitBreakerSlidingWindowSize()).isEqualTo(20);
+            assertThat(virtualLing.getConfig().isResilienceEnabled()).isTrue();
+            assertThat(virtualLing.getConfig().isCircuitBreakerEnabled()).isTrue();
+            assertThat(virtualLing.getConfig().isRateLimiterEnabled()).isTrue();
+            assertThat(virtualLing.getConfig().isBulkheadEnabled()).isTrue();
+            assertThat(virtualLing.getConfig().isTimeoutEnabled()).isTrue();
         }
     }
 

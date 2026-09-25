@@ -2,6 +2,8 @@ package com.lingframe.agent.advice;
 
 import com.lingframe.agent.bridge.LingFrameAgentBridge;
 import com.lingframe.agent.bridge.LingGovernanceContract;
+import com.lingframe.agent.adapter.GovernanceRejectException;
+import com.lingframe.api.exception.LingInvocationException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -13,6 +15,7 @@ import java.util.Collection;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("TaskExecutionAdvice 批次调度治理切面测试")
 class TaskExecutionAdviceTest {
@@ -61,6 +64,23 @@ class TaskExecutionAdviceTest {
     class ContractDelegation {
 
         @Test
+        @DisplayName("硬拒绝异常不得被切面 fail-open 吞掉")
+        void shouldPropagateGovernanceReject() {
+            final LingInvocationException cause = new LingInvocationException(
+                    "seatunnel:seatunnel", LingInvocationException.ErrorKind.CIRCUIT_OPEN);
+            final LingGovernanceContract contract = new CallRecordingContract() {
+                @Override
+                public void beforeTaskCall(Object task) {
+                    throw new GovernanceRejectException(cause);
+                }
+            };
+            LingFrameAgentBridge.registerContract(contract);
+
+            assertThatThrownBy(() -> TaskExecutionAdvice.onCallEnter(DUMMY_TASK))
+                    .isInstanceOf(GovernanceRejectException.class);
+        }
+
+        @Test
         @DisplayName("onCallEnter 应委托调用 beforeTaskCall 并透传 task")
         void shouldDelegateBeforeTaskCall() {
             final CallRecordingContract contract = new CallRecordingContract();
@@ -106,7 +126,7 @@ class TaskExecutionAdviceTest {
         }
     }
 
-    private static final class CallRecordingContract implements LingGovernanceContract {
+    private static class CallRecordingContract implements LingGovernanceContract {
 
         final AtomicInteger beforeCallCount = new AtomicInteger();
         final AtomicInteger afterCallCount = new AtomicInteger();

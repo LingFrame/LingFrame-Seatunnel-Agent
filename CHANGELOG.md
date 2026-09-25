@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-26
+
+### Changed
+
+- **升级 LingFrame 依赖**：`lingframe-api` 与 `lingframe-core` 统一升级至 `0.4.7`，与当前中央仓库版本对齐
+- **版本元数据统一**：根项目、各子模块及本地基准脚本统一升级至 Agent `0.3.0`
+- **Metaspace 审计结构化**：拆分审计运行器、SeaTunnel 作业客户端、作业矩阵、JVM 诊断和统计解析职责，保持既有审计语义并提升可维护性
+- **CI 诊断采集分级**：常规提交保留 MB 级统计，`jmap -clstats` 仅在合并 PR 时采集，缩短常规 CI 时长
+
+### Fixed
+
+- **E2E 质量门禁**：修复审计拆分后测试与质量门禁之间的兼容问题，确保 JDK 8/JDK 17 及 E2E 流程持续通过
+
 ## [0.2.0] - 2026-09-14
 
 ### Added

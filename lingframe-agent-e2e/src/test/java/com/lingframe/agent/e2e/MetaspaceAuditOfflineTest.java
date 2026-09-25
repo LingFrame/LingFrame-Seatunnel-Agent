@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @DisplayName("元空间审计解析与日志本地离线单元测试")
 class MetaspaceAuditOfflineTest {
 
-    private static final Logger log = LoggerFactory.getLogger(MetaspaceLeakIT.class);
+    private static final Logger log = LoggerFactory.getLogger(MetaspaceAuditOfflineTest.class);
 
     private static final Pattern HEAP_INFO_METASPACE_PATTERN =
             Pattern.compile("Metaspace\\s+used\\s+(\\d+)\\s*K", Pattern.CASE_INSENSITIVE);
@@ -136,8 +136,8 @@ class MetaspaceAuditOfflineTest {
                 "please wait.. computing liveness......done."
         );
 
-        final MetaspaceLeakIT.ClassLoaderStatsResult r =
-                MetaspaceLeakIT.parseClassLoaderStats(lines);
+        final ClassLoaderStatsResult r =
+                ClassLoaderStatsParser.parse(lines);
 
         assertThat(r.parsedLines).isEqualTo(3);
         assertThat(r.bootstrapClasses).isEqualTo(450L);
@@ -162,8 +162,8 @@ class MetaspaceAuditOfflineTest {
                 "total = 6\t9625\t16220000\t    N/A    \talive=3, dead=2\t    N/A    "
         );
 
-        final MetaspaceLeakIT.ClassLoaderStatsResult r =
-                MetaspaceLeakIT.parseClassLoaderStats(lines);
+        final ClassLoaderStatsResult r =
+                ClassLoaderStatsParser.parse(lines);
 
         assertThat(r.parsedLines).isEqualTo(5);
         assertThat(r.bootstrapClasses).isEqualTo(515L);
@@ -187,8 +187,8 @@ class MetaspaceAuditOfflineTest {
                 "total = 4 9025 16900000 N/A alive=2, dead=1 N/A"
         );
 
-        final MetaspaceLeakIT.ClassLoaderStatsResult r =
-                MetaspaceLeakIT.parseClassLoaderStats(lines);
+        final ClassLoaderStatsResult r =
+                ClassLoaderStatsParser.parse(lines);
 
         assertThat(r.parsedLines).isEqualTo(3);
         assertThat(r.bootstrapClasses).isEqualTo(515L);
@@ -205,8 +205,8 @@ class MetaspaceAuditOfflineTest {
                 "<bootstrap>\t515\t900000\t  null  \tlive\t<bootstrap>"
         );
 
-        final MetaspaceLeakIT.ClassLoaderStatsResult r =
-                MetaspaceLeakIT.parseClassLoaderStats(lines);
+        final ClassLoaderStatsResult r =
+                ClassLoaderStatsParser.parse(lines);
 
         assertThat(r.bootstrapClasses).isEqualTo(515L);
     }
@@ -220,8 +220,8 @@ class MetaspaceAuditOfflineTest {
                 " total = 3\t516\t900000\t    N/A    \talive=1, dead=0\t    N/A    "
         );
 
-        final MetaspaceLeakIT.ClassLoaderStatsResult r =
-                MetaspaceLeakIT.parseClassLoaderStats(lines);
+        final ClassLoaderStatsResult r =
+                ClassLoaderStatsParser.parse(lines);
 
         assertThat(r.parsedLines).isEqualTo(1);
         assertThat(r.bootstrapClasses).isEqualTo(515L);

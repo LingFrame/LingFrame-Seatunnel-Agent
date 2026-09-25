@@ -85,6 +85,7 @@ class JobLifecycleLeakIT {
                 .append("  per-job-idle-ttl-ms: ").append(TINY_TTL_MS).append('\n')
                 .append("  per-job-reap-interval-ms: ").append(TINY_REAP_INTERVAL_MS).append('\n')
                 .append("  resilience:\n")
+                .append("    enabled: true\n")
                 .append("    circuit-breaker-enabled: true\n")
                 .append("    rate-limiter-enabled: true\n")
                 .append("    fail-closed: false\n")

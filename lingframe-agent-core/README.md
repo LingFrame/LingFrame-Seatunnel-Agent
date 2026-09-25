@@ -34,7 +34,7 @@ mvn -o -pl :lingframe-agent-core -am install
 ```yaml
 governance:
   enabled: true
-  task-execution-advice-enabled: false     # 批次治理切点开关（默认关）
+  task-execution-advice-enabled: false     # 批次治理切点显式开关；弹性治理开启时自动联动
   dev-mode: false
   observability:                           # 可观测性（系统属性 -Dlingframe.agent.* 覆盖优先）
     trace-level: INFO                       #   trace 事件日志级别 OFF/WARN/INFO
@@ -42,9 +42,15 @@ governance:
     log-sample-rate: 1                      #   日志采样率（每 N 次打 1 次）
     timing-enabled: false                   #   per-call 钩子耗时埋点（默认关，零损耗）
   resilience:
-    circuit-breaker-enabled: false          # 基准/低频场景关，避免退避 sleep 主导
+    enabled: false                          # 弹性治理总开关，默认关闭；开启不影响 ClassLoader 清理
+    circuit-breaker-enabled: false
     rate-limiter-enabled: false
+    bulkhead-enabled: false
+    timeout-enabled: false
 ```
+
+`resilience.enabled: true` 允许弹性治理；仍需同时开启对应组件开关才会启用具体能力。GOVERN_ONLY 批次路径支持限流/熔断准入与结果回灌，舱壁/超时的真实执行隔离只在 Core 普通调用路径生效。
+关闭弹性治理只跳过相关调用控制，ClassLoader 全生命周期清理、TCCL 防御和卸载钩子仍然保留。
 
 ## JMX 可观测性
 

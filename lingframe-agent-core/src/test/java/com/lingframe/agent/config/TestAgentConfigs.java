@@ -31,6 +31,25 @@ public final class TestAgentConfigs {
     }
 
     /**
+     * 创建可显式控制弹性总开关的测试配置。
+     */
+    public static AgentConfig createWithResilienceEnabled(boolean resilienceEnabled,
+                                                          boolean governanceEnabled,
+                                                          boolean circuitBreakerEnabled,
+                                                          boolean rateLimiterEnabled,
+                                                          boolean grayRoutingEnabled,
+                                                          boolean permissionEnabled,
+                                                          boolean devMode) {
+        return new AgentConfig(governanceEnabled, resilienceEnabled,
+                circuitBreakerEnabled, rateLimiterEnabled, true, true,
+                grayRoutingEnabled, permissionEnabled, devMode, false,
+                100, 50, 20, 10, 3000, false,
+                true, 1024, 1_800_000L, 300_000L,
+                "INFO", "INFO", 1, false, true,
+                java.util.Collections.emptyList(), java.util.Collections.emptyList());
+    }
+
+    /**
      * 创建支持自定义弹性数值与切面开关的测试用配置实例。
      *
      * @param governanceEnabled 治理开关

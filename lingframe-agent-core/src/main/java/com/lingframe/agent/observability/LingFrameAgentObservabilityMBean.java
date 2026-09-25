@@ -30,6 +30,18 @@ public interface LingFrameAgentObservabilityMBean {
     /** DefaultClassLoaderService 目标类状态 */
     String getClassloaderServiceClassStatus();
 
+    /** 治理运行时状态：DISABLED / ACTIVE / NO_RUNTIME / FAILED / UNKNOWN。 */
+    String getGovernanceRuntimeStatus();
+
+    /** 有效运行档位：CLEANUP_ONLY / OBSERVE / ENFORCE。 */
+    String getGovernanceProfile();
+
+    /** 批次超时能力：DISABLED / OBSERVE_ONLY。当前不宣称可取消正在执行的 SeaTunnel call。 */
+    String getBatchTimeoutCapability();
+
+    /** 作业级治理能力状态：DISABLED / INSTALLED / UNSUPPORTED_VERSION / NO_RUNTIME / UNKNOWN。 */
+    String getJobIdExtractorStatus();
+
     /* ==================== per-call 钩子耗时统计 ==================== */
 
     boolean isTimingEnabled();
@@ -64,4 +76,11 @@ public interface LingFrameAgentObservabilityMBean {
      * JMX 调用：{@code resetCircuitBreaker()}。
      */
     void resetCircuitBreaker();
+
+    /**
+     * 一键关闭或恢复弹性治理。ClassLoader 清理始终保留。
+     */
+    void setResilienceEnabled(boolean enabled);
+
+    boolean isResilienceEnabled();
 }

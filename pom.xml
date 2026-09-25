@@ -6,7 +6,7 @@
 
     <groupId>cn.lingframe.agent</groupId>
     <artifactId>lingframe-seatunnel-agent</artifactId>
-    <version>0.2.0</version>
+    <version>0.3.0</version>
     <packaging>pom</packaging>
 
     <name>LingFrame SeaTunnel Agent</name>
@@ -34,7 +34,7 @@
         <maven.compiler.target>1.8</maven.compiler.target>
         <maven.compiler.parameters>true</maven.compiler.parameters>
 
-        <lingframe.version>0.4.5</lingframe.version>
+        <lingframe.version>0.4.7</lingframe.version>
         <seatunnel.version>2.3.13</seatunnel.version>
         <bytebuddy.version>1.14.12</bytebuddy.version>
         <slf4j.version>1.7.36</slf4j.version>

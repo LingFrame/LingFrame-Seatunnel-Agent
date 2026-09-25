@@ -1,5 +1,6 @@
 package com.lingframe.agent.advice;
 
+import com.lingframe.agent.adapter.GovernanceRejectException;
 import com.lingframe.agent.bridge.LingFrameAgentBridge;
 import net.bytebuddy.asm.Advice;
 
@@ -26,6 +27,9 @@ public final class TaskExecutionAdvice {
     public static void onCallEnter(@Advice.This Object task) {
         try {
             LingFrameAgentBridge.beforeTaskCall(task);
+        } catch (GovernanceRejectException e) {
+            // 硬拒绝必须逃逸到 SeaTunnel Worker，触发其 Failover/重试路径。
+            throw e;
         } catch (Throwable ignored) {
             // fail-open: advice 异常不得传播到宿主引擎
         }
