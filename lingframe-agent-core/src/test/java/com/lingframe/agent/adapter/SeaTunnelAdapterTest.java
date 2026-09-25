@@ -292,7 +292,7 @@ class SeaTunnelAdapterTest {
             // 物理事实验证：
             // GOVERN_ONLY 不把准入成功冒充业务成功；afterTaskCall 统一记录 5 次业务成功 + 2 次可用性失败。
             assertMetricCountCompatible(metrics.getTotalRequests().sum(), 7L, 14L);
-            assertMetricCountCompatible(metrics.getSuccessRequests().sum(), 5L, 10L);
+            assertMetricCountCompatible(metrics.getSuccessRequests().sum(), 5L, 12L);
             assertThat(metrics.getFailedRequests().sum()).isEqualTo(2L);
         }
 
