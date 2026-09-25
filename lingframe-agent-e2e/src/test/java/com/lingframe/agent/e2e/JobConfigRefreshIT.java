@@ -119,6 +119,7 @@ class JobConfigRefreshIT {
                 .append("  per-job-idle-ttl-ms: 1800000\n")
                 .append("  per-job-reap-interval-ms: 300000\n")
                 .append("  resilience:\n")
+                .append("    enabled: true\n")
                 .append("    circuit-breaker-enabled: true\n")
                 .append("    rate-limiter-enabled: true\n")
                 .append("    fail-closed: true\n")

@@ -17,6 +17,7 @@ governance:
   per-job-governance-enabled: true
   per-job-max-tracked-jobs: 4096
   resilience:
+    enabled: true
     circuit-breaker-enabled: true
     rate-limiter-enabled: true
     circuit-breaker-failure-rate-threshold: 50
