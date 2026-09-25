@@ -82,6 +82,11 @@ public class LingFrameAgentObservability implements LingFrameAgentObservabilityM
     }
 
     @Override
+    public String getBatchTimeoutCapability() {
+        return config != null ? config.getBatchTimeoutCapability().name() : "DISABLED";
+    }
+
+    @Override
     public String getJobIdExtractorStatus() {
         return statusOrEmpty("JobIdExtractor");
     }
@@ -152,6 +157,7 @@ public class LingFrameAgentObservability implements LingFrameAgentObservabilityM
                 .append("governance=").append(config.isGovernanceEnabled())
                 .append(", resilience=").append(isResilienceEnabled())
                 .append(", profile=").append(getGovernanceProfile())
+                .append(", batchTimeout=").append(getBatchTimeoutCapability())
                 .append(", runtimeStatus=").append(getGovernanceRuntimeStatus())
                 .append(", jobIdStatus=").append(getJobIdExtractorStatus())
                 .append(", taskAdvice(eff)=").append(config.isEffectiveTaskExecutionAdviceEnabled())

@@ -89,6 +89,19 @@ public class AgentConfigObservabilityTest {
     }
 
     @Test
+    public void batchTimeoutIsExplicitlyObservationOnly() {
+        final AgentConfig disabled = TestAgentConfigs.createWithResilienceEnabled(
+                false, true, false, false, false, false, false);
+        assertEquals(AgentConfig.BatchTimeoutCapability.DISABLED,
+                disabled.getBatchTimeoutCapability());
+
+        final AgentConfig enabled = TestAgentConfigs.createWithResilienceEnabled(
+                true, true, false, false, false, true, false);
+        assertEquals(AgentConfig.BatchTimeoutCapability.OBSERVE_ONLY,
+                enabled.getBatchTimeoutCapability());
+    }
+
+    @Test
     public void resilienceGlobalSwitchDisablesElasticAdviceOnly() {
         final AgentConfig c = TestAgentConfigs.createWithResilienceEnabled(
                 false, true, true, true, false, false, false);

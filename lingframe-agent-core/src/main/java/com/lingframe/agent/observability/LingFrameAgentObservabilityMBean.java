@@ -36,6 +36,9 @@ public interface LingFrameAgentObservabilityMBean {
     /** 有效运行档位：CLEANUP_ONLY / OBSERVE / ENFORCE。 */
     String getGovernanceProfile();
 
+    /** 批次超时能力：DISABLED / OBSERVE_ONLY。当前不宣称可取消正在执行的 SeaTunnel call。 */
+    String getBatchTimeoutCapability();
+
     /** 作业级治理能力状态：DISABLED / INSTALLED / UNSUPPORTED_VERSION / NO_RUNTIME / UNKNOWN。 */
     String getJobIdExtractorStatus();
 

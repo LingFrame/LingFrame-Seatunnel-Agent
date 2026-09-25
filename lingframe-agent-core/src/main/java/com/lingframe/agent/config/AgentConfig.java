@@ -37,6 +37,12 @@ public final class AgentConfig {
         ENFORCE
     }
 
+    /** SeaTunnel 批次超时能力：Agent 当前只能观测，不能自行取消正在执行的 call。 */
+    public enum BatchTimeoutCapability {
+        DISABLED,
+        OBSERVE_ONLY
+    }
+
     private static final Logger log = LoggerFactory.getLogger(AgentConfig.class);
 
     private static final String DEFAULT_CONFIG_PATH = "config/lingframe-governance.yaml";
@@ -441,6 +447,12 @@ public final class AgentConfig {
             return GovernanceProfile.CLEANUP_ONLY;
         }
         return failClosed ? GovernanceProfile.ENFORCE : GovernanceProfile.OBSERVE;
+    }
+
+    public BatchTimeoutCapability getBatchTimeoutCapability() {
+        return resilienceEnabled && timeoutEnabled
+                ? BatchTimeoutCapability.OBSERVE_ONLY
+                : BatchTimeoutCapability.DISABLED;
     }
 
     public boolean isFailClosed() {
