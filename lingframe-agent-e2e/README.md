@@ -64,7 +64,7 @@ Agent 真实 `-javaagent` JVM 下的端到端验证套件，包含 Fat-Jar 打�
 - `src/test/resources/e2e-jobs/`：14 组外置化作业配置（标准 SeaTunnel JSON）
 - `src/test/resources/file-input/input.csv`：LocalFile 源数据（1000 行）
 - `src/test/resources/seatunnel.yaml`：`classloader-cache-mode: false`（缓存模式下 `ClassLoaderReleaseAdvice` 跳过物理释放，泄漏验证失效）
-- `src/test/resources/lingframe-governance.yaml`：governance 开启、**批次切点关闭**（纯测 ClassLoader 清理，不引入治理损耗噪声）
+- `src/test/resources/lingframe-governance.yaml`：governance 总开关关闭（纯测 ClassLoader 清理，不引入治理损耗噪声）
 - `src/test/resources/docker-compose.yml`：SeaTunnel×2（Agent+Native）+ MySQL + Kafka 编排
 
 ## 参数配置
@@ -74,6 +74,7 @@ Agent 真实 `-javaagent` JVM 下的端到端验证套件，包含 Fat-Jar 打�
 | 串行轮次 | `lingframe.test.serial.rounds` | 2 | 逐轮采样 Metaspace 趋势 |
 | 并发轮次 | `lingframe.test.concurrent.rounds` | 5 | 多 Job 异构并发压测轮数 |
 | 外置作业目录 | `lingframe.test.job.dir` | 未设置 | 未设置时读 classpath `e2e-jobs/` |
+| 详细类加载器统计 | `lingframe.test.classloader.stats` | `false` | 开启 `jmap -clstats` 基线、GC 前及最终统计；仅用于合并 PR 的完整审计 |
 
 > 改轮数须改 pom.xml 的 `<properties>`，不是改代码中 `Integer.getInteger` 的默认值。
 

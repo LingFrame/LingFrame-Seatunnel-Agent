@@ -62,6 +62,11 @@ class MetaspaceLeakIT {
     private static final String NATIVE_REST_URL = "http://localhost:5802/hazelcast/rest/maps/submit-job";
     private static final String NATIVE_CONTAINER_NAME = "seatunnel-native";
 
+    /**
+     * 是否采集详细的 jmap -clstats 诊断数据。普通提交默认关闭，避免重型诊断拖慢 E2E 主路径。
+     */
+    private static final String CLASSLOADER_STATS_PROPERTY = "lingframe.test.classloader.stats";
+
     // 动态 Metaspace 增长阈值：base + perJob × totalJobExecutions，再乘安全余量
     // base ≈ 7 MB（Agent 固定残留），perJob ≈ 0.25 MB/作业次（CL 卸载后 chunk 惰性回收残留）
     private static final long METASPACE_GROWTH_BASE_BYTES = 7 * 1024 * 1024L;
@@ -73,6 +78,10 @@ class MetaspaceLeakIT {
         return (long) ((METASPACE_GROWTH_BASE_BYTES
                 + METASPACE_GROWTH_PER_JOB_MB * totalJobExecutions * 1024 * 1024L)
                 * METASPACE_GROWTH_SAFETY_MARGIN);
+    }
+
+    private static boolean isClassLoaderStatsEnabled() {
+        return Boolean.parseBoolean(System.getProperty(CLASSLOADER_STATS_PROPERTY, "false"));
     }
 
     private static final long MAX_NET_OVERHEAD_BYTES = 2 * 1024 * 1024L;
@@ -184,6 +193,7 @@ class MetaspaceLeakIT {
 
         log.info("Starting Native-Control and Agent-Treatment benchmarks in parallel"
                 + " (Kafka topics isolated by group prefix)...");
+        log.info("Detailed jmap -clstats collection: {}", isClassLoaderStatsEnabled() ? "ENABLED" : "DISABLED");
         final CompletableFuture<MetaspaceAuditResult> nativeFuture = CompletableFuture.supplyAsync(() -> {
             try {
                 return runTestMatrixAndAudit("Native-Control", NATIVE_REST_URL,
@@ -252,19 +262,21 @@ class MetaspaceLeakIT {
         log.info("  Overhead Threshold (Net)      : {}", formatMb(MAX_NET_OVERHEAD_BYTES));
         log.info("========================================================================");
 
-        // 按 ClassLoader 分组打印类统计，证明 retained classes 归属（非子 CL）
-        // 两组 jmap -clstats 并行执行（各自独立 docker exec，互不依赖）
-        final CompletableFuture<Void> agentDumpFuture = CompletableFuture.runAsync(() ->
-                dumpClassLoaderStats(AGENT_CONTAINER_NAME, "Agent-Treatment",
-                        agentResult.getBaselineClStats(), agentResult.getPreGcClStats()));
-        final CompletableFuture<Void> nativeDumpFuture = CompletableFuture.runAsync(() ->
-                dumpClassLoaderStats(NATIVE_CONTAINER_NAME, "Native-Control",
-                        nativeResult.getBaselineClStats(), nativeResult.getPreGcClStats()));
-        try {
-            agentDumpFuture.get();
-            nativeDumpFuture.get();
-        } catch (Exception e) {
-            throw new RuntimeException("Parallel jmap clstats failed", e);
+        // 按 ClassLoader 分组打印类统计，证明 retained classes 归属（非子 CL）。
+        // jmap -clstats 是重型诊断，仅在合并 PR 的 CI 中显式开启。
+        if (isClassLoaderStatsEnabled()) {
+            final CompletableFuture<Void> agentDumpFuture = CompletableFuture.runAsync(() ->
+                    dumpClassLoaderStats(AGENT_CONTAINER_NAME, "Agent-Treatment",
+                            agentResult.getBaselineClStats(), agentResult.getPreGcClStats()));
+            final CompletableFuture<Void> nativeDumpFuture = CompletableFuture.runAsync(() ->
+                    dumpClassLoaderStats(NATIVE_CONTAINER_NAME, "Native-Control",
+                            nativeResult.getBaselineClStats(), nativeResult.getPreGcClStats()));
+            try {
+                agentDumpFuture.get();
+                nativeDumpFuture.get();
+            } catch (Exception e) {
+                throw new RuntimeException("Parallel jmap clstats failed", e);
+            }
         }
 
         // ====== 泄漏判定（综合方案：诊断先行 → 断言殿后）======
@@ -397,8 +409,10 @@ class MetaspaceLeakIT {
         // 基线采样并行：classCounts 与 clstats 两个独立 docker exec 并行执行
         final CompletableFuture<long[]> baselineCountsFuture = CompletableFuture.supplyAsync(() ->
                 captureClassCounts(containerName));
-        final CompletableFuture<ClassLoaderStatsResult> baselineClStatsFuture = CompletableFuture.supplyAsync(() ->
-                captureClassLoaderStats(containerName, targetLabel + "-baseline"));
+        final CompletableFuture<ClassLoaderStatsResult> baselineClStatsFuture = isClassLoaderStatsEnabled()
+                ? CompletableFuture.supplyAsync(() ->
+                captureClassLoaderStats(containerName, targetLabel + "-baseline"))
+                : CompletableFuture.completedFuture(new ClassLoaderStatsResult());
         final long[] baselineClassCounts;
         final ClassLoaderStatsResult baselineClStats;
         try {
@@ -493,13 +507,16 @@ class MetaspaceLeakIT {
         Thread.sleep(10000);
 
         // 5.5 GC 前 clstats 采样（作业全部 FINISHED 后、Full GC 前）
-        final ClassLoaderStatsResult preGcClStats =
-                captureClassLoaderStats(containerName, targetLabel + "-pre-gc");
+        final ClassLoaderStatsResult preGcClStats = isClassLoaderStatsEnabled()
+                ? captureClassLoaderStats(containerName, targetLabel + "-pre-gc")
+                : new ClassLoaderStatsResult();
         final long preGcTotal = preGcClStats.bootstrapClasses + preGcClStats.appClasses
                 + preGcClStats.subClTotalClasses + preGcClStats.otherClasses;
-        log.info("[{}] clstats pre-GC total classes: {} (bootstrap={}, AppCL={}, STCL={}, other={})",
-                targetLabel, preGcTotal, preGcClStats.bootstrapClasses, preGcClStats.appClasses,
-                preGcClStats.subClTotalClasses, preGcClStats.otherClasses);
+        if (isClassLoaderStatsEnabled()) {
+            log.info("[{}] clstats pre-GC total classes: {} (bootstrap={}, AppCL={}, STCL={}, other={})",
+                    targetLabel, preGcTotal, preGcClStats.bootstrapClasses, preGcClStats.appClasses,
+                    preGcClStats.subClTotalClasses, preGcClStats.otherClasses);
+        }
 
         // 5. 阶段三：强制 Full GC 并采样终态 Metaspace
         forceFullGcInContainer(containerName);
