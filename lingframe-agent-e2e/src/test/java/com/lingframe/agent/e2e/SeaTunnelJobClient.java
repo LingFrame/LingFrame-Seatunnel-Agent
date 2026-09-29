@@ -12,6 +12,7 @@ import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -48,6 +49,7 @@ final class SeaTunnelJobClient {
     }
 
     static String submitJobOnce(String restUrl, String jobTag, String jobConfig) throws IOException {
+        final String isolatedConfig = SeaTunnelJobMatrix.withKafkaClientIds(jobConfig, UUID.randomUUID().toString());
         final HttpURLConnection conn = (HttpURLConnection) new URL(restUrl).openConnection();
         try {
             conn.setRequestMethod("POST");
@@ -56,7 +58,7 @@ final class SeaTunnelJobClient {
             conn.setConnectTimeout(5000);
             conn.setReadTimeout(60000);
             try (OutputStream os = conn.getOutputStream()) {
-                os.write(jobConfig.getBytes(StandardCharsets.UTF_8));
+                os.write(isolatedConfig.getBytes(StandardCharsets.UTF_8));
             }
             final int responseCode = conn.getResponseCode();
             if (responseCode != 200) {

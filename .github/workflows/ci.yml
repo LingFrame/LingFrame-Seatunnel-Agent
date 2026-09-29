@@ -129,6 +129,14 @@ jobs:
           echo "=== SeaTunnel Server Logs (always captured for cleaner/recycle audit) ==="
           docker compose logs seatunnel-server
           docker compose logs seatunnel-native
+          for CONTAINER in seatunnel-server seatunnel-native; do
+            RUNTIME_LOG="target/logs/${CONTAINER}-runtime.log"
+            docker logs "$CONTAINER" > "$RUNTIME_LOG" 2>&1 || TEST_STATUS=1
+            if grep -nE 'Dynamic metric collection failed|Collecting metrics from source .*TaskExecutionService failed|Error when .*metric.*JmxReporter|Error registering AppInfo mbean' "$RUNTIME_LOG"; then
+              echo "Metrics lifecycle regression detected in $CONTAINER"
+              TEST_STATUS=1
+            fi
+          done
           if [ $TEST_STATUS -ne 0 ]; then
             echo "=== SeaTunnel Server Logs upon Failure ==="
             docker compose logs seatunnel-native

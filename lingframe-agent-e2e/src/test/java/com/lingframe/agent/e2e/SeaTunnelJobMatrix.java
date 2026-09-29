@@ -2,6 +2,7 @@ package com.lingframe.agent.e2e;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -76,6 +77,47 @@ final class SeaTunnelJobMatrix {
 
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
 
+    /** 每次提交按执行标识与 source/sink 序号隔离 Kafka JMX 名称，保留其他 Kafka 配置。 */
+    static String withKafkaClientIds(String jobConfig, String submissionId) throws IOException {
+        final JsonNode root = JSON_MAPPER.readTree(jobConfig);
+        for (String role : new String[] {"source", "sink"}) {
+            final JsonNode nodes = root.path(role);
+            for (int i = 0; i < nodes.size(); i++) {
+                final JsonNode node = nodes.get(i);
+                if ("Kafka".equals(node.path("plugin_name").asText())) {
+                    final ObjectNode config = ((ObjectNode) node).with("kafka.config");
+                    final String prefix = config.path("client.id").asText("e2e");
+                    config.put("client.id", prefix + "-" + submissionId + "-" + role + "-" + i);
+                }
+            }
+        }
+        return JSON_MAPPER.writeValueAsString(root);
+    }
+
+    /** 同时接受 SeaTunnel 的标准列表配置与旧字符串配置，并逐个校验上游。 */
+    private static void validateInputs(JsonNode node, Set<String> outputs, boolean required, String fileName) {
+        final JsonNode input = node.path("plugin_input");
+        if (input.isMissingNode() && !required) {
+            return;
+        }
+        if (input.isArray()) {
+            if (input.isEmpty()) {
+                throw new IllegalStateException("Empty plugin_input in " + fileName);
+            }
+            for (JsonNode value : input) {
+                validateInput(value, outputs, fileName);
+            }
+        } else {
+            validateInput(input, outputs, fileName);
+        }
+    }
+
+    private static void validateInput(JsonNode input, Set<String> outputs, String fileName) {
+        if (!input.isTextual() || input.asText().isEmpty() || !outputs.contains(input.asText())) {
+            throw new IllegalStateException("Invalid plugin_input or missing upstream output: " + input + " in " + fileName);
+        }
+    }
+
     /**
      * 校验作业配置 JSON 的结构完整性与链路连通性。
      * <p>
@@ -121,15 +163,11 @@ final class SeaTunnelJobMatrix {
                 if (pluginName.isEmpty()) {
                     throw new IllegalStateException("Transform entry missing 'plugin_name' in " + fileName);
                 }
-                final String input = node.path("plugin_input").asText("");
                 final String output = node.path("plugin_output").asText("");
-                if (input.isEmpty() || output.isEmpty()) {
+                if (output.isEmpty()) {
                     throw new IllegalStateException("Transform entry missing 'plugin_input' or 'plugin_output' in " + fileName);
                 }
-                if (!outputs.contains(input)) {
-                    throw new IllegalStateException(
-                        "Transform plugin_input '" + input + "' has no matching upstream plugin_output in " + fileName);
-                }
+                validateInputs(node, outputs, true, fileName);
                 outputs.add(output);
             }
         }
@@ -138,11 +176,7 @@ final class SeaTunnelJobMatrix {
             if (pluginName.isEmpty()) {
                 throw new IllegalStateException("Sink entry missing 'plugin_name' in " + fileName);
             }
-            final String input = node.path("plugin_input").asText("");
-            if (!input.isEmpty() && !outputs.contains(input)) {
-                throw new IllegalStateException(
-                    "Sink plugin_input '" + input + "' has no matching upstream plugin_output in " + fileName);
-            }
+            validateInputs(node, outputs, false, fileName);
         }
         log.info("  Validated: {}", fileName);
     }

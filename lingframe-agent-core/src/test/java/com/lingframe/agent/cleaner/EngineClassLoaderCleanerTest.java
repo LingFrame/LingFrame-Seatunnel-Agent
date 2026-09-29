@@ -105,8 +105,8 @@ class EngineClassLoaderCleanerTest {
     }
 
     @Test
-    @DisplayName("验证 cleanFinished 物理移除 Map 条目并清空上下文内强引用")
-    void testCleanFinishedPurgesAndClearsContext() throws Exception {
+    @DisplayName("验证 cleanFinished 物理移除 Map 条目但保留并发读者的上下文")
+    void testCleanFinishedPurgesWithoutMutatingContext() throws Exception {
         final MockTaskExecutionService mockService = new MockTaskExecutionService();
         final Object taskGroupObj = new Object();
         final MockTaskGroupLocation locKey = new MockTaskGroupLocation(999L);
@@ -125,10 +125,10 @@ class EngineClassLoaderCleanerTest {
         // 核心断言 1：finishedExecutionContexts 被物理移除，Map 变空
         Assertions.assertTrue(mockService.getFinishedExecutionContexts().isEmpty());
 
-        // 核心断言 2：context 内部字段被清空或置为 null
-        Assertions.assertNull(context.getTaskGroup());
-        Assertions.assertTrue(context.getClassLoaders().isEmpty());
-        Assertions.assertTrue(context.getJars().isEmpty());
+        // 核心断言 2：已经取得引用的指标读者仍能读取完整上下文
+        Assertions.assertSame(taskGroupObj, context.getTaskGroup());
+        Assertions.assertEquals(1, context.getClassLoaders().size());
+        Assertions.assertEquals(1, context.getJars().size());
 
         // 核心断言 3：再次执行幂等安全
         EngineClassLoaderCleaner.cleanFinished();

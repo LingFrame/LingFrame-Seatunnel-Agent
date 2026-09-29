@@ -68,8 +68,8 @@ Agent 真实 `-javaagent` JVM 下的端到端验证套件，包含 Fat-Jar 打�
 {
   "env": {"job.name": "示例", "job.mode": "BATCH"},
   "source": [{"plugin_name": "Kafka", "plugin_output": "t_src", ...}],
-  "transform": [{"plugin_name": "Sql", "plugin_input": "t_src", "plugin_output": "t_mid", "query": "select * from dual where id > 0"}],
-  "sink": [{"plugin_name": "Console", "plugin_input": "t_mid"}]
+  "transform": [{"plugin_name": "Sql", "plugin_input": ["t_src"], "plugin_output": "t_mid", "query": "select * from dual where id > 0"}],
+  "sink": [{"plugin_name": "Console", "plugin_input": ["t_mid"]}]
 }
 ```
 
@@ -110,3 +110,13 @@ mvn -pl :lingframe-agent-e2e -Dlingframe.test.job.dir=/path/to/custom-jobs verif
 
 - `lingframe-agent-dist`（提供 Fat-Jar 给测试扫描/挂载）
 - testcontainers 未使用——裸 `ProcessBuilder` 调 docker CLI（pom 已清理无用 `testcontainers.version` 属性）
+
+## 指标并发与诊断边界
+
+引擎上下文清理只移除 Map 持有的条目，不清空 `TaskGroupContext` 内部字段。SeaTunnel 指标采集会浅拷贝这些条目，已取得引用的读者必须能够继续访问完整上下文，读者结束后对象由 GC 回收。
+
+现有 REST 提交入口为每次提交、每个 Kafka source/sink 生成独立的 `kafka.config.client.id`，避免作业隔离类加载器中的默认计数器生成重复 JMX 名称。保留 topic、消费组及其他 Kafka 参数。当前内置矩阵使用单并行度；外置多并行度 Kafka sink 作业还需按 writer 隔离客户端名称，不能仅靠作业级配置推断已覆盖。
+
+CI 在原有 E2E 步骤中检查两组容器日志：指标采集失败及 Kafka JMX 注册/注销异常会导致失败，并保留完整日志供定位。类加载器为零仅表示采样时无 SeaTunnel 作业类加载器残留；净增类的归属和长期元空间趋势仍需堆快照或更长时间的采样确认，A/B 元空间增长差值不代表 CPU 或延迟开销。
+
+Hikari 固定连接池的 `idleTimeout` 警告来自 SeaTunnel JDBC 内部参数设置；延迟建表、初次获取 Kafka topic 元数据等启动警告按实际作业结果判断，未通过关闭日志掩盖。

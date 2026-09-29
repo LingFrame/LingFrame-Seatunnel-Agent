@@ -155,7 +155,7 @@ class MetaspaceLeakIT {
                 formatDelta(agentResult.getClassLoaderCount()),
                 formatDelta(agentResult.getClassLoaderCount() - nativeResult.getClassLoaderCount())));
         log.info("========================================================================");
-        log.info("  Net Overhead (Agent - Native) : {}", formatMb(netOverhead));
+        log.info("  Metaspace Growth Difference (Agent - Native) : {}", formatMb(netOverhead));
         final long dynamicGrowthThreshold = computeDynamicGrowthThreshold(agentResult.getTotalJobExecutions());
         log.info("  Growth Threshold (Agent, dynamic) : {} (for {} job executions)",
                 formatMb(dynamicGrowthThreshold), agentResult.getTotalJobExecutions());
@@ -186,7 +186,7 @@ class MetaspaceLeakIT {
 
         // 1. 辅助提醒：net overhead 超阈值时 WARN
         if (netOverhead > MAX_NET_OVERHEAD_BYTES) {
-            log.warn("Agent net overhead {} exceeds threshold {}."
+            log.warn("Agent/native Metaspace growth difference {} exceeds threshold {}."
                     + " Further investigation recommended.",
                     formatMb(netOverhead), formatMb(MAX_NET_OVERHEAD_BYTES));
         }
@@ -209,12 +209,12 @@ class MetaspaceLeakIT {
                         String.format(Locale.ROOT, "%.1f", (1.0 - ratio) * 100));
                 if (ratio >= METASPACE_CONVERGENCE_THRESHOLD) {
                     log.warn("========================================================================");
-                    log.warn("  !!! TREND WARNING !!! Agent Metaspace NOT converging!");
+                    log.warn("  !!! TREND WARNING !!! Early-round Metaspace growth ratio exceeds threshold.");
                     log.warn("  Round 2 delta ({}) / Round 1 delta ({}) = {}% >= {}%",
                             formatMb(round2Delta), formatMb(round1Delta),
                             String.format(Locale.ROOT, "%.1f", ratio * 100),
                             String.format(Locale.ROOT, "%.0f", METASPACE_CONVERGENCE_THRESHOLD * 100));
-                    log.warn("  Potential Metaspace leak -- investigate CL retention.");
+                    log.warn("  Two early samples do not establish a steady state; inspect loader ownership and longer runs.");
                     log.warn("========================================================================");
                 }
             }
@@ -269,10 +269,10 @@ class MetaspaceLeakIT {
             }
         }
 
-        // 4. 主要断言（殿后）：CL=0 → 无泄漏
+        // 4. 主要断言（殿后）：仅验证采样时无 SeaTunnel 作业类加载器残留
         //    放在 dump 之后，确保断言失败前 dump 已生成
         assertThat(agentResult.getClassLoaderCount())
-                .as("SeaTunnelChildFirstClassLoader live instances must be 0 (no leak), actual: %d",
+                .as("SeaTunnelChildFirstClassLoader live instances must be 0 after completed jobs and GC, actual: %d",
                         agentResult.getClassLoaderCount())
                 .isZero();
     }
