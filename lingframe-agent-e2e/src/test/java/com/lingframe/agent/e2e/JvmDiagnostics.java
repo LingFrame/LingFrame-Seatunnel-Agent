@@ -221,8 +221,8 @@ final class JvmDiagnostics {
     /**
      * 打印类加载/卸载净增（baseline -> final），结合 CL 拘留计数判定泄漏证候。
      * <p>
-     * 判据（综合方案）：CL=0 时类元数据未卸载属 bootstrap/AppCL 正常驻留，非泄漏；
-     * CL>0 且 retained>0 时 CL 拘留 + 类未卸载 = Metaspace 泄漏成立。
+     * CL=0 仅排除采样时 SeaTunnel 作业类加载器残留；净增类的归属与长期趋势需单独验证。
+     * CL>0 且 retained>0 时记录类加载器残留证据。
      */
     static void printClassCountDiff(String targetLabel, long[] baseline, long[] finalSample,
                                      long classLoaderCount) {
@@ -243,15 +243,15 @@ final class JvmDiagnostics {
                 targetLabel, baseline[1], finalSample[1], unloadedDelta);
         final String verdict;
         if (classLoaderCount < 0) {
-            verdict = "CL 采样失败，无法判定";
+            verdict = "ClassLoader sampling unavailable; verdict unknown";
         } else if (retained <= 0) {
-            verdict = "不成立";
+            verdict = "No net class growth; inspect loader retention separately";
         } else if (classLoaderCount == 0) {
-            verdict = "有残留但 CL=0（类来自 bootstrap/AppCL 正常驻留，非泄漏）";
+            verdict = "No SeaTunnel loaders retained; remaining class ownership and long-term growth unverified";
         } else {
-            verdict = "成立（CL 拘留 + 类未卸载 = Metaspace 泄漏）";
+            verdict = "SeaTunnel loaders retained with net class growth";
         }
-        log.info("[{}]   retained (loaded - unloaded) delta: +{} classes => 类元数据未卸载证候 {}",
+        log.info("[{}]   retained (loaded - unloaded) delta: +{} classes => {}",
                 targetLabel, retained, verdict);
         log.info("[{}] ===========================================================", targetLabel);
     }

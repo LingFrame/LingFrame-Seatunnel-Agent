@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-09-30
+
+### Fixed
+
+- **MongoDB/Hadoop 类加载器回收**：依据 MAT 引用链，在既有物理释放入口清理 MongoDB 缓冲池 pruner、Hadoop CodecPool 及计数缓存、Token ServiceLoader、反射构造器缓存、共享 RPC Configuration 和 striped-read 线程工厂中的目标加载器引用；按加载器归属处理，保留其他作业的共享资源
+- **指标采集与清理竞态**：三个上下文清理入口只移除引擎 Map 持有的条目，不再清空正在被指标快照读取的 TaskGroupContext 字段
+- **E2E Kafka JMX 冲突**：每次提交按 source/sink 隔离客户端名称，保留其他 Kafka 配置；规范 plugin_input 列表及 JDBC username 配置
+
+### Added
+
+- **MongoDB → Hive A/B 场景**：复用原有 E2E 矩阵，补充 MongoDB、Hive Metastore、HDFS 与 Parquet/Snappy 链路，矩阵扩展为 15 组
+- **并发回归与日志检查**：新增上下文快照和 Kafka 配置回归测试；CI 检查两组容器的指标采集与 Kafka JMX 异常
+- **稳定版本分支**：main 的构建和 E2E 通过、Release 发布成功后，从本次发布提交创建同名版本分支（如 `v0.3.1`），不会跟随之后移动的 main
+
+### Changed
+
+- **版本元数据统一**：根项目、子模块、本地基准脚本及部署文档升级至 `0.3.1`；LingFrame 依赖保持 `0.4.7`，SeaTunnel 基线保持 `2.3.13`
+- **诊断结论边界**：类加载器计数为零仅表示采样时无 SeaTunnel 作业类加载器残留；净增类归属、长期元空间趋势和 CPU/延迟开销需单独验证
+- **发布重跑保护**：不再删除已有 tag/Release；同版本指向不同提交时失败，稳定分支已存在时验证其包含发布提交并保留已有提交
+
 ## [0.3.0] - 2026-09-26
 
 ### Changed

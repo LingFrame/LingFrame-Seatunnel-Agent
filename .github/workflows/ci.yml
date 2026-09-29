@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, lingframe/issue-12456-repro]
   pull_request:
     branches: [main, dev]
   workflow_dispatch:
@@ -90,6 +90,8 @@ jobs:
       - name: Run E2E Tests
         run: |
           cd lingframe-agent-e2e
+          mkdir -p target/logs
+          trap 'docker compose logs --no-color > target/logs/docker-compose.log 2>&1; docker compose down -v' EXIT
           docker compose up -d
           echo "Waiting for SeaTunnel cluster (agent: 5801) to become ready..."
           READY_AGENT=false
@@ -127,13 +129,19 @@ jobs:
           echo "=== SeaTunnel Server Logs (always captured for cleaner/recycle audit) ==="
           docker compose logs seatunnel-server
           docker compose logs seatunnel-native
+          for CONTAINER in seatunnel-server seatunnel-native; do
+            RUNTIME_LOG="target/logs/${CONTAINER}-runtime.log"
+            docker logs "$CONTAINER" > "$RUNTIME_LOG" 2>&1 || TEST_STATUS=1
+            if grep -nE 'Dynamic metric collection failed|Collecting metrics from source .*TaskExecutionService failed|Error when .*metric.*JmxReporter|Error registering AppInfo mbean' "$RUNTIME_LOG"; then
+              echo "Metrics lifecycle regression detected in $CONTAINER"
+              TEST_STATUS=1
+            fi
+          done
           if [ $TEST_STATUS -ne 0 ]; then
             echo "=== SeaTunnel Server Logs upon Failure ==="
             docker compose logs seatunnel-native
-            docker compose down -v
             exit $TEST_STATUS
           fi
-          docker compose down -v
 
       - name: Upload E2E Test & Audit Logs
         if: always()
@@ -147,6 +155,9 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
+    concurrency:
+      group: publish-release
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     needs: [build-and-test, e2e-test]
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -169,18 +180,16 @@ jobs:
           echo "seatunnel_version=${SEATUNNEL_VERSION}" >> $GITHUB_OUTPUT
           echo "asset_name=${ASSET_NAME}" >> $GITHUB_OUTPUT
 
-      - name: Check if Tag Already Exists
-        id: check_tag
+      - name: Validate Existing Release Tag
+        env:
+          TAG: ${{ steps.get_version.outputs.version }}
         run: |
-          TAG="${{ steps.get_version.outputs.version }}"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, deleting old tag and release for overwrite."
-            git push origin :refs/tags/"$TAG" || true
-            gh release delete "$TAG" --yes || true
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "Tag $TAG is new, will publish release."
-            echo "exists=false" >> $GITHUB_OUTPUT
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            TAG_COMMIT=$(git rev-parse "refs/tags/$TAG^{commit}")
+            if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $TAG already refers to $TAG_COMMIT. Bump the version before publishing another commit."
+              exit 1
+            fi
           fi
 
       - name: Download Agent Fat-Jar
@@ -197,6 +206,25 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.get_version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           name: v${{ steps.get_version.outputs.agent_version }}-seatunnel-${{ steps.get_version.outputs.seatunnel_version }}
           generate_release_notes: true
           files: release-assets/${{ steps.get_version.outputs.asset_name }}
+          fail_on_unmatched_files: true
+
+      - name: Create Stable Version Branch After Release
+        env:
+          VERSION_BRANCH: ${{ steps.get_version.outputs.version }}
+        run: |
+          git check-ref-format "refs/heads/$VERSION_BRANCH"
+          EXISTING_BRANCH=$(git ls-remote --heads origin "refs/heads/$VERSION_BRANCH")
+          if [ -n "$EXISTING_BRANCH" ]; then
+            git fetch origin "refs/heads/$VERSION_BRANCH"
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+              echo "::error::Branch $VERSION_BRANCH does not contain the release commit $GITHUB_SHA."
+              exit 1
+            fi
+            echo "Stable branch $VERSION_BRANCH already contains this release; preserving it."
+          else
+            git push origin "$GITHUB_SHA:refs/heads/$VERSION_BRANCH"
+          fi

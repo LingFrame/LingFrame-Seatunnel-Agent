@@ -36,9 +36,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * 双端治理模型：
  * <ul>
  *   <li><b>Worker 节点</b>：缓存 {@code TaskExecutionService} 实例，周期性将
- *       {@code finishedExecutionContexts} 中已完成的 {@code TaskGroupContext} 深度断引用
- *       （清空 {@code classLoaders}/{@code jars}，置空 {@code taskGroup}），并显式
- *       从 Map 中物理移除（{@code iterator.remove()}）。</li>
+ *       {@code finishedExecutionContexts} 中已完成的 {@code TaskGroupContext} 从 Map 中移除。
+ *       不修改上下文对象，让已取得快照的指标读者继续安全读取，读者结束后由 GC 回收。</li>
  *   <li><b>Coordinator 节点</b>：深层切断 {@code JobMaster} 内部持有的 {@code physicalPlan}、
  *       {@code logicalDag} 等核心领域对象强引用，并从 {@code runningJobMasterMap} 中移除，
  *       彻底切断 Master 端对 Connector 算子与类的 GC Root。</li>
@@ -57,9 +56,6 @@ public final class EngineClassLoaderCleaner {
     /** 引擎字段名（与 SeaTunnel 2.3.13 源码对齐） */
     private static final String FIELD_FINISHED = "finishedExecutionContexts";
     private static final String FIELD_EXECUTION_CONTEXTS = "executionContexts";
-    private static final String FIELD_CLASS_LOADERS = "classLoaders";
-    private static final String FIELD_JARS = "jars";
-    private static final String FIELD_TASK_GROUP = "taskGroup";
     private static final String FIELD_CACHE_MODE = "cacheMode";
     private static final String FIELD_CLASS_LOADER_CACHE = "classLoaderCache";
     private static final String FIELD_REF_COUNT = "classLoaderReferenceCount";
@@ -163,7 +159,7 @@ public final class EngineClassLoaderCleaner {
     }
 
     /**
-     * 清空并移除引擎已完成作业上下文中的 ClassLoader / jars / taskGroup 强引用。
+     * 移除引擎对已完成作业上下文的持有引用，保留并发读者正在使用的对象。
      * <p>
      * 幂等：直接从 {@code finishedExecutionContexts} 中移除已完成条目，断绝引擎内部堆积；
      * 并联动排空对应作业在 {@code DefaultClassLoaderService} 中可能滞留的 ClassLoader 缓存，
@@ -235,10 +231,7 @@ public final class EngineClassLoaderCleaner {
                             completedJobIds.add(jobId);
                         }
                     }
-                    final Object ctx = entry.getValue();
-                    if (ctx != null) {
-                        cleanContextFields(ctx);
-                    }
+                    // 指标采集持有的是浅拷贝引用；不能清空上下文内部字段。
                     iterator.remove();
                     cleaned++;
                 }
@@ -309,7 +302,7 @@ public final class EngineClassLoaderCleaner {
             }
 
             // 精准清理 TaskExecutionService 中属于当前 jobId 的 executionContexts 和 finishedExecutionContexts
-            // 斩断 TaskGroupContext → taskGroup → tasks → Task → Action → Class → ClassLoader 引用链
+            // 移除引擎 Map → TaskGroupContext 的引用，保留指标快照中的对象完整性
             // 注意：不从 runningJobMasterMap 移除——由引擎 JobMaster.cleanJob() 负责
             // （storeFinishedJobState 写入 finishedJobStateImap + removeJobIMap）
             try {
@@ -349,7 +342,7 @@ public final class EngineClassLoaderCleaner {
                         }
                     }
                     // 精准清理 TaskExecutionService 中属于当前 jobId 的 executionContexts 和 finishedExecutionContexts
-                    // 斩断 TaskGroupContext → taskGroup → tasks → Task → Action → Class → ClassLoader 引用链
+                    // 移除引擎 Map → TaskGroupContext 的引用，保留指标快照中的对象完整性
                     try {
                         final Method getTesMethod = server.getClass().getMethod("getTaskExecutionService");
                         final Object tes = getTesMethod.invoke(server);
@@ -832,7 +825,7 @@ public final class EngineClassLoaderCleaner {
 
      * 精准清理 TaskExecutionService 中属于指定作业的 executionContexts 和 finishedExecutionContexts。
      * <p>
-     * 斩断 TaskGroupContext → taskGroup → tasks → Task → Action → Class → ClassLoader 引用链。
+     * 移除引擎 Map → TaskGroupContext 的引用，保留指标快照中的对象完整性。
      *
      * @param tes   TaskExecutionService 实例
      * @param jobId 作业标识
@@ -871,10 +864,6 @@ public final class EngineClassLoaderCleaner {
                     final Map.Entry<?, ?> entry = it.next();
                     final Object key = entry.getKey();
                     if (key != null && extractJobId(key) == jobId) {
-                        final Object ctx = entry.getValue();
-                        if (ctx != null) {
-                            cleanContextFields(ctx);
-                        }
                         it.remove();
                         removed++;
                     }
@@ -996,10 +985,6 @@ public final class EngineClassLoaderCleaner {
                     continue;
                 }
                 if (!activeJobIds.contains(jobId)) {
-                    final Object ctx = entry.getValue();
-                    if (ctx != null) {
-                        cleanContextFields(ctx);
-                    }
                     it.remove();
                     staleRemoved++;
                     completedJobIds.add(jobId);
@@ -1146,40 +1131,11 @@ public final class EngineClassLoaderCleaner {
         return -1L;
     }
 
-    /**
-     * 深度清空单个上下文实例的字段引用。
-     *
-     * @param ctx TaskGroupContext 实例
-     */
-    private static void cleanContextFields(Object ctx) {
-        try {
-            final Class<?> clazz = ctx.getClass();
-            clearMapField(clazz, ctx, FIELD_CLASS_LOADERS);
-            clearMapField(clazz, ctx, FIELD_JARS);
-            final Field tgField = clazz.getDeclaredField(FIELD_TASK_GROUP);
-            setAccessibleSafely(tgField);
-            tgField.set(ctx, null);
-        } catch (Throwable t) {
-            log.warn("EngineClassLoaderCleaner failed to clean context fields: {}", t.getMessage());
-        }
-    }
-
     /** 读取宿主对象的私有字段值。 */
     private static Object readFieldValue(Object owner, String fieldName) throws Exception {
         final Field field = owner.getClass().getDeclaredField(fieldName);
         setAccessibleSafely(field);
         return field.get(owner);
-    }
-
-    /** 清空宿主对象某个 Map 字段（私有字段，需放宽访问权限）。 */
-    private static void clearMapField(Class<?> clazz, Object owner, String fieldName)
-            throws Exception {
-        final Field field = clazz.getDeclaredField(fieldName);
-        setAccessibleSafely(field);
-        final Object value = field.get(owner);
-        if (value instanceof Map) {
-            ((Map<?, ?>) value).clear();
-        }
     }
 
     /** 读取类的静态私有字段值。 */
