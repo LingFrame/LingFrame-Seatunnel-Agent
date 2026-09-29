@@ -88,6 +88,7 @@ services:
       timeout: 5s
       retries: 30
 
+
   # seatunnel-native — 不挂载 Agent 的原生 SeaTunnel，作为 A/B 对照组
   seatunnel-native:
     image: apache/seatunnel:2.3.13
@@ -173,3 +174,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+
+networks:
+  default:
+    name: lingframe-e2e
