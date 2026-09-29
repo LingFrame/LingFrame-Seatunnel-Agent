@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, lingframe/issue-12456-repro]
   pull_request:
     branches: [main, dev]
   workflow_dispatch:
@@ -90,6 +90,8 @@ jobs:
       - name: Run E2E Tests
         run: |
           cd lingframe-agent-e2e
+          mkdir -p target/logs
+          trap 'docker compose logs --no-color > target/logs/docker-compose.log 2>&1; docker compose down -v' EXIT
           docker compose up -d
           echo "Waiting for SeaTunnel cluster (agent: 5801) to become ready..."
           READY_AGENT=false
@@ -130,10 +132,8 @@ jobs:
           if [ $TEST_STATUS -ne 0 ]; then
             echo "=== SeaTunnel Server Logs upon Failure ==="
             docker compose logs seatunnel-native
-            docker compose down -v
             exit $TEST_STATUS
           fi
-          docker compose down -v
 
       - name: Upload E2E Test & Audit Logs
         if: always()

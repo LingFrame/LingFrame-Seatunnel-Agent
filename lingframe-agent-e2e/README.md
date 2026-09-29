@@ -11,13 +11,13 @@ Agent 真实 `-javaagent` JVM 下的端到端验证套件，包含 Fat-Jar 打�
 | `JobConfigRefreshIT` | 作业级配置热刷：自动发现初始化 / 作业级刷新 / 全局广播与覆盖优先级 | 本地 `mvn verify`（无需 Docker）|
 | `JobLifecycleLeakIT` | 千级作业零残留：1000 作业后灵元/弹性缓存/指标注册表零残留 | 本地 `mvn verify`（约 3.4s，无需 Docker）|
 | `DualJobFaultInjectionIT` | 双作业故障注入：注入隔离 / OPEN→HALF_OPEN→CLOSED 自愈恢复闭环 / fail-closed=false 软退避安全基线 | 本地 `mvn verify`（无需 Docker）|
-| `MetaspaceLeakIT` | Docker Compose 起 SeaTunnel 集群，连续多轮作业验证 ClassLoader 物理释放后 Metaspace 零增长（14 组作业 × 7 轮 × 2 组 = 196 作业次） | **CI-only**（需 Docker，本机 `Assumptions` 优雅跳过）|
+| `MetaspaceLeakIT` | Docker Compose 起 SeaTunnel 集群，连续多轮作业验证 ClassLoader 物理释放后 Metaspace 零增长（15 组作业 × 7 轮 × 2 组 = 210 作业次） | **CI-only**（需 Docker，本机 `Assumptions` 优雅跳过）|
 
 ## 作业矩阵
 
 作业配置外置化于 `src/test/resources/e2e-jobs/` 目录，每个文件是一个标准 SeaTunnel JSON 作业配置。增删 JSON 文件即可调整测试矩阵，无需改代码。
 
-### 现有 14 组作业
+### 现有 15 组作业
 
 | 文件 | Source | Sink | Transform | 依赖服务 |
 |------|--------|------|-----------|---------|
@@ -35,6 +35,9 @@ Agent 真实 `-javaagent` JVM 下的端到端验证套件，包含 Fat-Jar 打�
 | `mysql2kafka.json` | Jdbc | Kafka | - | MySQL + Kafka |
 | `mysql2kafka_sql.json` | Jdbc | Kafka | Sql | MySQL + Kafka |
 | `mysql2mysql.json` | Jdbc | Jdbc | - | MySQL |
+| `mongodb2hive.json` | MongoDB | Hive（Parquet + Snappy） | - | MongoDB + Hive Metastore + HDFS |
+
+`mongodb2hive.json` 用于验证 [SeaTunnel #12456](https://github.com/apache/seatunnel/issues/12456) 的重复批作业场景。沿用原有 A/B、轮次和断言，Hive 连接器自动建表；`__GROUP__` 替换为 native/agent，隔离表名与 HDFS 路径。不需要 HiveServer2。这里只增加验证场景，不修改 Agent 清理逻辑。官方 2.3.13 单节点镜像与原报告的分离部署、定制连接器存在差异，Native 未出现残留时不能宣称已复现。
 
 ### 添加新作业
 
@@ -61,7 +64,7 @@ Agent 真实 `-javaagent` JVM 下的端到端验证套件，包含 Fat-Jar 打�
 
 ## 资源文件
 
-- `src/test/resources/e2e-jobs/`：14 组外置化作业配置（标准 SeaTunnel JSON）
+- `src/test/resources/e2e-jobs/`：15 组外置化作业配置（标准 SeaTunnel JSON）
 - `src/test/resources/file-input/input.csv`：LocalFile 源数据（1000 行）
 - `src/test/resources/seatunnel.yaml`：`classloader-cache-mode: false`（缓存模式下 `ClassLoaderReleaseAdvice` 跳过物理释放，泄漏验证失效）
 - `src/test/resources/lingframe-governance.yaml`：governance 总开关关闭（纯测 ClassLoader 清理，不引入治理损耗噪声）

@@ -28,7 +28,8 @@ final class SeaTunnelJobMatrix {
         if (topicPrefix == null || topicPrefix.isEmpty()) {
             return jobConfig;
         }
-        return jobConfig.replace("test-topic-1", topicPrefix + "test-topic-1")
+        return jobConfig.replace("__GROUP__", topicPrefix.replace("-", ""))
+                         .replace("test-topic-1", topicPrefix + "test-topic-1")
                          .replace("test-topic-2", topicPrefix + "test-topic-2");
     }
 

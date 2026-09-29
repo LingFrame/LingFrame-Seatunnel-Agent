@@ -155,6 +155,34 @@
                                     <outputDirectory>${project.build.directory}/drivers</outputDirectory>
                                     <destFileName>mysql-connector-java.jar</destFileName>
                                 </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.apache.seatunnel</groupId>
+                                    <artifactId>connector-mongodb</artifactId>
+                                    <version>${seatunnel.version}</version>
+                                    <outputDirectory>${project.build.directory}/connectors/seatunnel</outputDirectory>
+                                    <destFileName>connector-mongodb.jar</destFileName>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.apache.seatunnel</groupId>
+                                    <artifactId>connector-hive</artifactId>
+                                    <version>${seatunnel.version}</version>
+                                    <outputDirectory>${project.build.directory}/connectors/seatunnel</outputDirectory>
+                                    <destFileName>connector-hive.jar</destFileName>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.apache.hive</groupId>
+                                    <artifactId>hive-exec</artifactId>
+                                    <version>3.1.3</version>
+                                    <outputDirectory>${project.build.directory}/drivers</outputDirectory>
+                                    <destFileName>hive-exec.jar</destFileName>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.apache.thrift</groupId>
+                                    <artifactId>libfb303</artifactId>
+                                    <version>0.9.3</version>
+                                    <outputDirectory>${project.build.directory}/drivers</outputDirectory>
+                                    <destFileName>libfb303.jar</destFileName>
+                                </artifactItem>
                             </artifactItems>
                         </configuration>
                     </execution>

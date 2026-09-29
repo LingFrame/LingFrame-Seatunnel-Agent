@@ -1,0 +1,21 @@
+{
+  "env": {"job.name": "mongodb2hive-__GROUP__", "job.mode": "BATCH", "parallelism": 1},
+  "source": [{
+    "plugin_name": "MongoDB",
+    "uri": "mongodb://mongodb:27017",
+    "database": "test",
+    "collection": "events",
+    "flat.sync-string": false,
+    "schema": {"fields": {"id": "int", "name": "string"}}
+  }],
+  "sink": [{
+    "plugin_name": "Hive",
+    "table_name": "default.__GROUP___mongodb_hive",
+    "metastore_uri": "thrift://hive-metastore:9083",
+    "compress_codec": "snappy",
+    "data_save_mode": "APPEND_DATA",
+    "schema_save_mode": "CREATE_SCHEMA_WHEN_NOT_EXIST",
+    "save_mode_create_template": "CREATE TABLE IF NOT EXISTS `${database}`.`${table}` (${rowtype_fields}) STORED AS PARQUET LOCATION 'hdfs://namenode:9000/e2e/__GROUP__/mongodb_hive'",
+    "hive.hadoop.conf": {"fs.defaultFS": "hdfs://namenode:9000", "dfs.replication": "1"}
+  }]
+}

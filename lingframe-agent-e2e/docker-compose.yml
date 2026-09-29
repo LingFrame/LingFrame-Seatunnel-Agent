@@ -51,8 +51,14 @@ services:
     image: apache/seatunnel:2.3.13
     container_name: seatunnel-server
     depends_on:
-      - mysql-server
-      - kafka-server
+      mysql-server:
+        condition: service_started
+      kafka-server:
+        condition: service_started
+      mongodb:
+        condition: service_healthy
+      hive-metastore:
+        condition: service_healthy
     cap_add:
       - SYS_PTRACE
     ports:
@@ -68,6 +74,8 @@ services:
       - ../lingframe-agent-dist/target/lingframe-seatunnel-agent.jar:/opt/seatunnel/lib/lingframe-seatunnel-agent.jar
       - ./target/connectors/seatunnel:/opt/seatunnel/connectors/seatunnel
       - ./target/drivers/mysql-connector-java.jar:/opt/seatunnel/lib/mysql-connector-java.jar
+      - ./target/drivers/hive-exec.jar:/opt/seatunnel/lib/hive-exec.jar:ro
+      - ./target/drivers/libfb303.jar:/opt/seatunnel/lib/libfb303.jar:ro
       - ./src/test/resources/file-input:/opt/seatunnel/e2e-input:ro
     command: >
       sh -c "
@@ -85,8 +93,14 @@ services:
     image: apache/seatunnel:2.3.13
     container_name: seatunnel-native
     depends_on:
-      - mysql-server
-      - kafka-server
+      mysql-server:
+        condition: service_started
+      kafka-server:
+        condition: service_started
+      mongodb:
+        condition: service_healthy
+      hive-metastore:
+        condition: service_healthy
     cap_add:
       - SYS_PTRACE
     ports:
@@ -101,6 +115,8 @@ services:
       - ./src/test/resources/log4j2.properties:/opt/seatunnel/config/log4j2.properties
       - ./target/connectors/seatunnel:/opt/seatunnel/connectors/seatunnel
       - ./target/drivers/mysql-connector-java.jar:/opt/seatunnel/lib/mysql-connector-java.jar
+      - ./target/drivers/hive-exec.jar:/opt/seatunnel/lib/hive-exec.jar:ro
+      - ./target/drivers/libfb303.jar:/opt/seatunnel/lib/libfb303.jar:ro
       - ./src/test/resources/file-input:/opt/seatunnel/e2e-input:ro
     command: >
       sh -c "
@@ -110,5 +126,50 @@ services:
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5801/hazelcast/health/ready"]
       interval: 10s
+      timeout: 5s
+      retries: 30
+  mongodb:
+    image: mongo:6.0.18
+    volumes:
+      - ./src/test/resources/mongo-init.js:/docker-entrypoint-initdb.d/init.js:ro
+    healthcheck:
+      test: [CMD, mongosh, --quiet, --eval, "quit(db.getSiblingDB('test').events.countDocuments({}) === 100 ? 0 : 1)"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    environment:
+      CLUSTER_NAME: e2e
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+      HDFS_CONF_dfs_permissions_enabled: 'false'
+      HDFS_CONF_dfs_replication: '1'
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    hostname: datanode
+    environment:
+      SERVICE_PRECONDITION: namenode:9870
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+      HDFS_CONF_dfs_permissions_enabled: 'false'
+      HDFS_CONF_dfs_replication: '1'
+    depends_on:
+      namenode:
+        condition: service_healthy
+
+  hive-metastore:
+    image: apache/hive:3.1.3
+    environment:
+      SERVICE_NAME: metastore
+      SERVICE_OPTS: -Dhive.metastore.warehouse.dir=hdfs://namenode:9000/warehouse
+    volumes:
+      - ./docker/hive-core-site.xml:/opt/hive/conf/core-site.xml:ro
+    depends_on:
+      datanode:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD-SHELL, "bash -c 'echo > /dev/tcp/localhost/9083'"]
+      interval: 5s
       timeout: 5s
       retries: 30
