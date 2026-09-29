@@ -56,6 +56,13 @@ public final class ConnectorResourceCleaner {
             if (token != null && visited.add(token)) {
                 cleanTokenRenewers(token, target);
             }
+            for (String name : new String[]{"org.apache.hadoop.util.ReflectionUtils",
+                "org.apache.hadoop.hdfs.DFSClient", "org.apache.hadoop.ipc.ProtobufRpcEngine"}) {
+                final Class<?> sharedType = findLoaded(findLoaded, loader, name);
+                if (sharedType != null && visited.add(sharedType)) {
+                    HadoopSharedResourceCleaner.cleanup(sharedType, target);
+                }
+            }
         }
     }
 

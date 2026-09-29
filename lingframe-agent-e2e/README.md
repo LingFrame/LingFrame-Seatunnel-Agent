@@ -44,8 +44,11 @@ Agent 真实 `-javaagent` JVM 下的端到端验证套件，包含 Fat-Jar 打�
 - `CodecPool` 只删除目标加载器的压缩/解压类型条目，同时删除对应计数缓存，并调用空闲实例的 `end()`；其他作业的池与计数保留。
 - `Token.renewers` 仅在其 `loader` 就是目标加载器时，沿用原同步锁，将其绑定到 Token 定义加载器并 `reload()`，一并清掉旧 provider/迭代器引用。存在安全授权上下文时保留原状并告警；JDK 9+ 需要开放 `java.base/java.util` 的反射访问。
 - MongoDB 4.7.1 仅对目标加载器自己定义的 `PowerOfTwoBufferPool.DEFAULT` 调用 `disablePruning()`，通过驱动关闭执行器，使线程退出。不按线程名中断线程，不关闭父加载器共享池。
+- `ReflectionUtils.CONSTRUCTOR_CACHE` 只移除目标加载器定义的类及构造器。首次修复后的 MAT 显示，这是压缩器池路径之外的另一处持有源。
+- HDFS `STRIPED_READ_THREAD_POOL` 的 `DaemonFactory` 本身继承 `Thread`，但从未启动，不属于活动线程扫描范围。仅重置其指向目标加载器的 TCCL，并在未启用 SecurityManager 时清除持有该加载器的继承安全上下文；保留原线程池和工厂。
+- `ProtobufRpcEngine.CLIENTS` 按 SocketFactory 跨作业共享 RPC Client；仅将其中仍指向已释放加载器的 `Configuration` 绑定回宿主加载器，不停止 Client 或移除共享缓存条目。
 
-类型查询使用 `findLoadedClass`，不因清理去加载尚未使用的连接器；JDK 9+ 需要开放 `java.base/java.lang`。未匹配的版本/不可访问字段会告警并跳过。新增回归测试使用真实 Hadoop 3.1.4 / MongoDB 4.7.1；最终是否消除残留仍以本矩阵的原有 GC 后零 ClassLoader 断言为准。
+类型查询使用 `findLoadedClass`，不因清理去加载尚未使用的连接器；JDK 9+ 需要开放 `java.base/java.lang` 和 `java.base/java.security`。未匹配的版本/不可访问字段会告警并跳过。新增回归测试使用真实 Hadoop 3.1.4 / MongoDB 4.7.1；最终是否消除残留仍以本矩阵的原有 GC 后零 ClassLoader 断言为准。
 
 ### 添加新作业
 
