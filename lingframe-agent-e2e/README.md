@@ -37,7 +37,15 @@ Agent 真实 `-javaagent` JVM 下的端到端验证套件，包含 Fat-Jar 打�
 | `mysql2mysql.json` | Jdbc | Jdbc | - | MySQL |
 | `mongodb2hive.json` | MongoDB | Hive（Parquet + Snappy） | - | MongoDB + Hive Metastore + HDFS |
 
-`mongodb2hive.json` 用于验证 [SeaTunnel #12456](https://github.com/apache/seatunnel/issues/12456) 的重复批作业场景。沿用原有 A/B、轮次和断言，Hive 连接器自动建表；`__GROUP__` 替换为 native/agent，隔离表名与 HDFS 路径。不需要 HiveServer2。这里只增加验证场景，不修改 Agent 清理逻辑。官方 2.3.13 单节点镜像与原报告的分离部署、定制连接器存在差异，Native 未出现残留时不能宣称已复现。
+`mongodb2hive.json` 用于验证 [SeaTunnel #12456](https://github.com/apache/seatunnel/issues/12456) 的重复批作业场景。沿用原有 A/B、轮次和断言，Hive 连接器自动建表；`__GROUP__` 替换为 native/agent，隔离表名与 HDFS 路径。不需要 HiveServer2。官方 2.3.13 单节点镜像与原报告的分离部署、定制连接器存在差异，Native 未出现残留时不能宣称已复现。
+
+该场景的 MAT 已定位三处持有源：Hadoop `CodecPool` 中以插件 `SnappyCompressor.class` 为 key 的缓存、`Token.renewers` 的 `ServiceLoader.loader`、MongoDB `BufferPoolPruner` 的执行器/线程安全上下文。Agent 在原有作业终态物理释放入口补充 `ConnectorResourceCleaner`，cleanup-only 模式同样执行，且早于关闭 URLClassLoader：
+
+- `CodecPool` 只删除目标加载器的压缩/解压类型条目，同时删除对应计数缓存，并调用空闲实例的 `end()`；其他作业的池与计数保留。
+- `Token.renewers` 仅在其 `loader` 就是目标加载器时，沿用原同步锁，将其绑定到 Token 定义加载器并 `reload()`，一并清掉旧 provider/迭代器引用。存在安全授权上下文时保留原状并告警；JDK 9+ 需要开放 `java.base/java.util` 的反射访问。
+- MongoDB 4.7.1 仅对目标加载器自己定义的 `PowerOfTwoBufferPool.DEFAULT` 调用 `disablePruning()`，通过驱动关闭执行器，使线程退出。不按线程名中断线程，不关闭父加载器共享池。
+
+类型查询使用 `findLoadedClass`，不因清理去加载尚未使用的连接器；JDK 9+ 需要开放 `java.base/java.lang`。未匹配的版本/不可访问字段会告警并跳过。新增回归测试使用真实 Hadoop 3.1.4 / MongoDB 4.7.1；最终是否消除残留仍以本矩阵的原有 GC 后零 ClassLoader 断言为准。
 
 ### 添加新作业
 

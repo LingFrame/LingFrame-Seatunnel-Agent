@@ -5,6 +5,7 @@ import com.lingframe.agent.bridge.LingGovernanceContract;
 import com.lingframe.agent.bridge.ReleasedClassLoaderRegistry;
 import com.lingframe.agent.cleaner.EngineClassLoaderCleaner;
 import com.lingframe.agent.hook.EngineSafeThreadReferenceUnloadHook;
+import com.lingframe.agent.cleaner.ConnectorResourceCleaner;
 import com.lingframe.agent.config.AgentConfig;
 import com.lingframe.agent.config.HazelcastConfigCenter;
 import com.lingframe.api.exception.LingInvocationException;
@@ -148,6 +149,7 @@ public final class SeaTunnelAdapter implements LingGovernanceContract {
         }
         log.info("Triggering physical release for ClassLoader {}", classLoader.getClass().getName());
         ReleasedClassLoaderRegistry.register(classLoader);
+        ConnectorResourceCleaner.cleanup(classLoader);
         EngineSafeThreadReferenceUnloadHook.resetThreadContextClassLoaders(CALLER_LING_ID, classLoader);
         EngineClassLoaderCleaner.cleanStaticCaches(classLoader);
         EngineClassLoaderCleaner.closeClassLoaderSafely(classLoader);
