@@ -2,10 +2,17 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 适用 | lingframe-seatunnel-agent 0.3.0 及 lingframe-core 0.4.7 及以上 |
+| 适用 | lingframe-seatunnel-agent 0.3.1 及 lingframe-core 0.4.7 及以上 |
 | 读者 | 平台运维 / SRE / 集群负责人 |
 
 ---
+
+## 0. 0.3.1 升级说明
+
+- 本次保持 LingFrame `0.4.7` 和 SeaTunnel `2.3.13` 基线，重点修复 MongoDB/Hadoop 的作业类加载器引用，以及上下文清理与指标快照读取之间的竞态；不需要增加治理配置项。
+- 类加载器物理清理适用于 `classloader-cache-mode: false`，关闭治理总开关时仍执行。共享缓存模式不应套用逐作业零类加载器残留结论。
+- Kafka 客户端名称隔离在 E2E 提交入口实现，生产作业仍应按作业及并发 writer 配置独立客户端标识；Agent 不会自动改写生产 Kafka 配置。
+- 发布制品为 `lingframe-seatunnel-agent-0.3.1-seatunnel-2.3.13.jar`；GitHub Release 成功后，CI 从对应 main 发布提交创建稳定分支 `v0.3.1`。详细修改见 [CHANGELOG](../CHANGELOG.md#031---2026-09-30)。
 
 ## 1. 范围与硬依赖
 

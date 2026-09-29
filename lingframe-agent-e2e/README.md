@@ -11,7 +11,7 @@ Agent 真实 `-javaagent` JVM 下的端到端验证套件，包含 Fat-Jar 打�
 | `JobConfigRefreshIT` | 作业级配置热刷：自动发现初始化 / 作业级刷新 / 全局广播与覆盖优先级 | 本地 `mvn verify`（无需 Docker）|
 | `JobLifecycleLeakIT` | 千级作业零残留：1000 作业后灵元/弹性缓存/指标注册表零残留 | 本地 `mvn verify`（约 3.4s，无需 Docker）|
 | `DualJobFaultInjectionIT` | 双作业故障注入：注入隔离 / OPEN→HALF_OPEN→CLOSED 自愈恢复闭环 / fail-closed=false 软退避安全基线 | 本地 `mvn verify`（无需 Docker）|
-| `MetaspaceLeakIT` | Docker Compose 起 SeaTunnel 集群，连续多轮作业验证 ClassLoader 物理释放后 Metaspace 零增长（15 组作业 × 7 轮 × 2 组 = 210 作业次） | **CI-only**（需 Docker，本机 `Assumptions` 优雅跳过）|
+| `MetaspaceLeakIT` | Docker Compose 起 SeaTunnel 集群，连续多轮作业验证 作业完成及 GC 后 SeaTunnel 作业类加载器零残留，并记录元空间增长趋势（15 组作业 × 7 轮 × 2 组 = 210 作业次） | **CI-only**（需 Docker，本机 `Assumptions` 优雅跳过）|
 
 ## 作业矩阵
 
@@ -120,3 +120,9 @@ mvn -pl :lingframe-agent-e2e -Dlingframe.test.job.dir=/path/to/custom-jobs verif
 CI 在原有 E2E 步骤中检查两组容器日志：指标采集失败及 Kafka JMX 注册/注销异常会导致失败，并保留完整日志供定位。类加载器为零仅表示采样时无 SeaTunnel 作业类加载器残留；净增类的归属和长期元空间趋势仍需堆快照或更长时间的采样确认，A/B 元空间增长差值不代表 CPU 或延迟开销。
 
 Hikari 固定连接池的 `idleTimeout` 警告来自 SeaTunnel JDBC 内部参数设置；延迟建表、初次获取 Kafka topic 元数据等启动警告按实际作业结果判断，未通过关闭日志掩盖。
+
+## 0.3.1 修复验证记录
+
+本次修复复用了上述 15 组矩阵，未增加独立复现流程。[修复代码的 CI 运行](https://github.com/LingFrame/LingFrame-Seatunnel-Agent/actions/runs/36617931333) 中，原生与 Agent 各 105 个作业全部 FINISHED，其中 MongoDB → Hive 各 7 次。Agent 最终 SeaTunnel 作业类加载器为 0，MAT 堆快照复核一致；原生组残留 567 个。Agent 最终元空间 90.41 MiB、相对启动增长 35.13 MiB；指标采集 NPE 和 Kafka JMX 异常均未再出现。
+
+该记录是单轮修复验证，不是所有部署场景的保证：运行容器为 Java 8，治理运行时关闭，未校验 Hive 落地行数/内容；长期元空间平台期仍需更多采样。SeaTunnel 内部主键格式、Hikari 参数与 slot 收尾警告仍存在，不计作本次已修复项。
